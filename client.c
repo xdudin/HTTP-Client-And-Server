@@ -18,6 +18,7 @@ typedef struct URL{
     char* path;
 }URL;
 
+char* strcasestr_custom(const char* haystack, const char* needle);
 void print_usage();
 bool isInteger (const char *str, int *result);
 int build_query_string(char* argv[], int n, int index, char** result);
@@ -209,23 +210,42 @@ int main(int argc, char* argv[]) {
     return 0;
 }
 
-// TODO: handle both Location and location headers
+char* strcasestr_custom(const char* haystack, const char* needle){
+    if (!*needle) return (char*)haystack;
+
+    for(; *haystack; haystack++){
+        const char* h = haystack;
+        const char* n = needle;
+
+        while (*h && *n && tolower(*h) == tolower(*n)){
+            h++;
+            n++;
+        }
+        if (!*n) return (char*)haystack;
+    }
+
+    return NULL;
+}
+
 void check_redirection(unsigned char* response, char* result){
     int status_code;
     if (sscanf((const char*) response, "HTTP/%*d.%*d %d", &status_code) == 1){
         if (status_code == 200)
             result[0] = '\0';
         if (status_code >= 300 && status_code < 400){
-            char* loc_start = strstr((const char*) response, "location:");
+            char* loc_start = strcasestr_custom((const char*) response, "location:");
             if(loc_start){
                 char loc[256];
-                if(sscanf(loc_start, "location: %255[^\r\n]", loc) == 1){
+                if(sscanf(loc_start, "location: %255[^\r\n]", loc) == 1
+                    || sscanf(loc_start, "Location: %255[^\r\n]", loc) == 1){
                     strcpy(result, loc);
                 }
             }
             else
                 result[0] = '\0';
         }
+        else
+            result[0] = '\0';
     }
 }
 
