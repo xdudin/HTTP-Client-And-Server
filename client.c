@@ -18,6 +18,9 @@ typedef struct URL{
     char* path;
 }URL;
 
+int send_http_request(URL url, char* query_string);
+unsigned char* read_http_response(int sock);
+void parse_console(int argc, char* argv[], URL* url, char** query_string);
 char* strcasestr_custom(const char* haystack, const char* needle);
 void print_usage();
 bool isInteger (const char *str, int *result);
@@ -27,170 +30,24 @@ void free_pointers(unsigned char** response, char** query_string);
 void check_redirection(unsigned char* response, char* result);
 
 int main(int argc, char* argv[]) {
-    int status;
-    int n = 0;
     URL url = {};
     char *query_string = "";
 
-        switch (argv[1][0] == '-') {
-            case 1:
-                // query arguments come first
-                if (argv[1][1] != 'r') {
-                    print_usage();
-                    exit(1);
-                }
-                // must have argument n after -r:
-                if (!isInteger(argv[2], &n)) {
-                    print_usage();
-                    exit(1);
-                }
+    parse_console(argc, argv, &url, &query_string);
 
-                status = build_query_string(argv, n, 3, &query_string);
-                switch (status) {
-                    case MEMORY_ERROR:
-                        perror("malloc");
-                        exit(1);
-                    case INVALID_FORMAT:
-                        print_usage();
-                        exit(EXIT_FAILURE);
-                }
-
-                if (validate_and_parse_url(argv[argc - 1], &url) != 0) {
-                    print_usage();
-                    exit(EXIT_FAILURE);
-                }
-                break;
-
-            case 0:
-                // url come first
-                if (validate_and_parse_url(argv[1], &url) != 0) {
-                    print_usage();
-                    exit(EXIT_FAILURE);
-                }
-
-                if (argv[2] != NULL && argv[2][0] == '-') {
-                    // must have r after -
-                    if (argv[2][1] != 'r') {
-                        print_usage();
-                        exit(1);
-                    }
-
-                    // must have argument n after -r:
-                    if (!isInteger(argv[3], &n)) {
-                        print_usage();
-                        exit(1);
-                    }
-
-                    status = build_query_string(argv, n, 4, &query_string);
-                    switch (status) {
-                        case MEMORY_ERROR:
-                            perror("malloc");
-                            exit(1);
-                        case INVALID_FORMAT:
-                            print_usage();
-                            exit(EXIT_FAILURE);
-                    }
-                    printf("%s\n", query_string);
-                }
-                break;
-        }
-
-        // TODO: make a function for sending http request as well as reading it
-
-    unsigned char *response = NULL;
-
+    unsigned char* response = NULL;
+    int sockfd;
     while(true) {
-
-        char request[1024];
-        // null-terminate the request buffer
-        memset(request, 0, sizeof(request));
-
-        sprintf(request, "GET /%s%s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n", url.path, query_string,
-                url.domain);
-
-        printf("HTTP request =\n%s\nLEN = %d\n", request, (int) strlen(request));
-
-        int sock;
-        struct sockaddr_in server_addr;
-        struct hostent *server;
-
-        // Create socket
-        sock = socket(AF_INET, SOCK_STREAM, 0);
-        if (sock < 0) {
-            perror("socket");
+        sockfd = send_http_request(url, query_string);
+        if(sockfd < 0){
             free_pointers(&response, &query_string);
             exit(EXIT_FAILURE);
         }
-
-        // Get server information - apply dns
-        server = gethostbyname(url.domain);
-        if (!server) {
-            herror("gethostbyname");
-            close(sock);
-            exit(EXIT_FAILURE);
-        }
-
-        // Setup server socket structure
-        memset(&server_addr, 0, sizeof(server_addr));
-        // assign the format of the ip address we use with this socket
-        server_addr.sin_family = AF_INET;
-        // assign the port number in network byte order
-        server_addr.sin_port = htons(url.port);
-        // assign the ip address of the server
-        server_addr.sin_addr.s_addr = ((struct in_addr *) server->h_addr_list[0])->s_addr;
-
-        if (connect(sock, (struct sockaddr *) &server_addr, sizeof(server_addr)) < 0) {
-            perror("connect");
+        response = read_http_response(sockfd);
+        if(response == NULL){
             free_pointers(&response, &query_string);
             exit(EXIT_FAILURE);
         }
-
-        size_t total_sent = 0;
-        size_t request_len = strlen(request);
-
-        while (total_sent < request_len) {
-            ssize_t bytes_sent = write(sock, request + total_sent, request_len - total_sent);
-            if (bytes_sent < 0) {
-                perror("write");
-                free_pointers(&response, &query_string);
-                exit(EXIT_FAILURE);
-            }
-            total_sent += bytes_sent;
-        }
-
-        ssize_t total = 0;
-        ssize_t received = 0;
-        unsigned char buffer[1024];
-
-        do {
-            // null terminate the chunk buffer
-            memset(buffer, 0, sizeof(buffer));
-            // read the response_file in chunks
-            received = read(sock, buffer, sizeof(buffer));
-            // allocate memory for the response_file
-            response = realloc(response, total + received + 1);
-            if (response == NULL) {
-                perror("realloc");
-                free_pointers(&response, &query_string);
-                exit(EXIT_FAILURE);
-            }
-            // copy the chunk to the response_file buffer
-            memcpy(response + total, buffer, received);
-            // update the total number of bytes read
-            total += received;
-        } while (received > 0);
-
-        // if received is -1, then there was an error
-        if (received < 0) {
-            perror("read");
-            free_pointers(&response, &query_string);
-            exit(EXIT_FAILURE);
-        }
-
-        printf("%s", response);
-        printf("\n Total received response_file bytes: %d\n", (int) total);
-
-        close(sock);
 
         char location[256];
         check_redirection(response, location);
@@ -205,9 +62,176 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    close(sockfd);
     free_pointers(&response, &query_string);
 
     return 0;
+}
+
+int send_http_request(URL url, char* query_string){
+    char request[1024];
+    // null-terminate the request buffer
+    memset(request, 0, sizeof(request));
+
+    sprintf(request, "GET /%s%s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n", url.path, query_string,
+            url.domain);
+
+    printf("HTTP request =\n%s\nLEN = %d\n", request, (int) strlen(request));
+
+    int sock;
+    struct sockaddr_in server_addr;
+    struct hostent *server;
+
+    // Create socket
+    sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (sock < 0) {
+        perror("socket");
+        return -1;
+    }
+
+    // Get server information - apply dns
+    server = gethostbyname(url.domain);
+    if (!server) {
+        herror("gethostbyname");
+        close(sock);
+        return -1;
+    }
+
+    // Setup server socket structure
+    memset(&server_addr, 0, sizeof(server_addr));
+    // assign the format of the ip address we use with this socket
+    server_addr.sin_family = AF_INET;
+    // assign the port number in network byte order
+    server_addr.sin_port = htons(url.port);
+    // assign the ip address of the server
+    server_addr.sin_addr.s_addr = ((struct in_addr *) server->h_addr_list[0])->s_addr;
+
+    if (connect(sock, (struct sockaddr *) &server_addr, sizeof(server_addr)) < 0) {
+        perror("connect");
+        close(sock);
+        return -1;
+    }
+
+    size_t total_sent = 0;
+    size_t request_len = strlen(request);
+
+    while (total_sent < request_len) {
+        ssize_t bytes_sent = write(sock, request + total_sent, request_len - total_sent);
+        if (bytes_sent < 0) {
+            perror("write");
+            close(sock);
+            return -1;
+        }
+        total_sent += bytes_sent;
+    }
+
+    return sock;
+}
+
+unsigned char* read_http_response(int sock){
+    unsigned char* response = NULL;
+    ssize_t total = 0;
+    ssize_t received = 0;
+    unsigned char buffer[1024];
+
+    do {
+        // null terminate the chunk buffer
+        memset(buffer, 0, sizeof(buffer));
+        // read the response_file in chunks
+        received = read(sock, buffer, sizeof(buffer));
+        // allocate memory for the response_file
+        response = realloc(response, total + received + 1);
+        if (response == NULL) {
+            perror("realloc");
+            close(sock);
+            return NULL;
+        }
+        // copy the chunk to the response_file buffer
+        memcpy(response + total, buffer, received);
+        // update the total number of bytes read
+        total += received;
+    } while (received > 0);
+
+    // if received is -1, then there was an error
+    if (received < 0) {
+        perror("read");
+        close(sock);
+        return NULL;
+    }
+
+    printf("%s", response);
+    printf("\n Total received response_file bytes: %d\n", (int) total);
+
+    close(sock);
+
+    return response;
+}
+
+void parse_console(int argc, char* argv[], URL* url, char** query_string){
+    int status;
+    int n = 0;
+
+    switch (argv[1][0] == '-') {
+        case 1:
+            // query arguments come first
+            if (argv[1][1] != 'r') {
+                print_usage();
+                exit(1);
+            }
+            // must have argument n after -r:
+            if (!isInteger(argv[2], &n)) {
+                print_usage();
+                exit(1);
+            }
+
+            status = build_query_string(argv, n, 3, query_string);
+            switch (status) {
+                case MEMORY_ERROR:
+                    perror("malloc");
+                    exit(1);
+                case INVALID_FORMAT:
+                    print_usage();
+                    exit(EXIT_FAILURE);
+            }
+
+            if (validate_and_parse_url(argv[argc - 1], url) != 0) {
+                print_usage();
+                exit(EXIT_FAILURE);
+            }
+            break;
+
+        case 0:
+            // url come first
+            if (validate_and_parse_url(argv[1], url) != 0) {
+                print_usage();
+                exit(EXIT_FAILURE);
+            }
+
+            if (argv[2] != NULL && argv[2][0] == '-') {
+                // must have r after -
+                if (argv[2][1] != 'r') {
+                    print_usage();
+                    exit(1);
+                }
+
+                // must have argument n after -r:
+                if (!isInteger(argv[3], &n)) {
+                    print_usage();
+                    exit(1);
+                }
+
+                status = build_query_string(argv, n, 4, query_string);
+                switch (status) {
+                    case MEMORY_ERROR:
+                        perror("malloc");
+                        exit(1);
+                    case INVALID_FORMAT:
+                        print_usage();
+                        exit(EXIT_FAILURE);
+                }
+            }
+            break;
+    }
 }
 
 char* strcasestr_custom(const char* haystack, const char* needle){
