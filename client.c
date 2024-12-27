@@ -6,7 +6,13 @@
 #include <netinet/in.h>
 #include <netdb.h>
 #include <unistd.h>
-#include <fcntl.h>
+
+// ----- DEBUG -----
+// curl command to save the response to a file
+// curl -D headers.txt http://example.com -o body.txt
+//#include "tests.c"
+//#define DEBUG
+// ----- DEBUG -----
 
 #define SUCCESS 0
 #define INVALID_FORMAT 1
@@ -20,50 +26,92 @@ typedef struct URL{
 
 int send_http_request(URL url, char* query_string);
 unsigned char* read_http_response(int sock);
-void parse_console(int argc, char* argv[], URL* url, char** query_string);
+int parse_console(int argc, char* argv[], URL* url, char** query_string);
 char* strcasestr_custom(const char* haystack, const char* needle);
 void print_usage();
 bool isInteger (const char *str, int *result);
 int build_query_string(char* argv[], int n, int index, char** result);
 int validate_and_parse_url(char *url, URL* url_struct);
-void free_pointers(unsigned char** response, char** query_string);
-void check_redirection(unsigned char* response, char* result);
+void free_pointers(unsigned char** response, char** query_string, char** location);
+int check_redirection(unsigned char* response, char** result);
 
 int main(int argc, char* argv[]) {
+
+#ifdef DEBUG
+    printf("[!] Debug Mode\n");
+
+    FILE* fp;
+    int dup_stdout = redirect_stdout(&fp, "response.txt");
+#endif
+
+    int status;
     URL url = {};
     char *query_string = "";
 
-    parse_console(argc, argv, &url, &query_string);
+    status = parse_console(argc, argv, &url, &query_string);
+    if(status == MEMORY_ERROR || status == INVALID_FORMAT) {
+        free_pointers(NULL, &query_string, NULL);
+        exit(EXIT_FAILURE);
+    }
 
     unsigned char* response = NULL;
     int sockfd;
+    char *location = NULL;
+    char* temp_location = NULL;
     while(true) {
         sockfd = send_http_request(url, query_string);
         if(sockfd < 0){
-            free_pointers(&response, &query_string);
+            free_pointers(&response, &query_string, &location);
             exit(EXIT_FAILURE);
         }
         response = read_http_response(sockfd);
         if(response == NULL){
-            free_pointers(&response, &query_string);
+            free_pointers(&response, &query_string, &location);
             exit(EXIT_FAILURE);
         }
 
-        char location[256];
-        check_redirection(response, location);
-        if (location[0] == '\0')
-            break;
-        else {
-            if (strncmp(location, "http://", 7) != 0)
-                validate_and_parse_url(location, &url);
+        if(temp_location){
+            free(temp_location);
+            temp_location = NULL;
+        }
+        status = check_redirection(response, &location);
+        if (status == MEMORY_ERROR) {
+            // Memory allocation failure
+            free_pointers(&response, &query_string, &location);
+            exit(EXIT_FAILURE);
+        }
+        else if(status == SUCCESS){
+            // Found redirection status code with the location header
+            temp_location = realloc(temp_location, strlen(location) + 1);
+            if(temp_location == NULL){
+                free(temp_location);
+                free_pointers(&response, &query_string, &location);
+                exit(EXIT_FAILURE);
+            }
+            strcpy(temp_location, location);
+            //temp_location[strlen(location)] = '\0';
+
+            if (strncmp(temp_location, "http://", 7) == 0)
+                validate_and_parse_url(temp_location, &url);
             else
-                url.path = location + 1;
+                url.path = temp_location[0] == '/' ? temp_location + 1 : temp_location;
+
+            free_pointers(&response, &query_string, &location);
+            query_string = "";
             continue;
+        }
+        else {
+            // Not a redirection status code
+            break;
         }
     }
 
     close(sockfd);
-    free_pointers(&response, &query_string);
+    free_pointers(&response, &query_string, &location);
+
+#ifdef DEBUG
+    restore_stdout(dup_stdout);
+#endif
 
     return 0;
 }
@@ -134,29 +182,40 @@ unsigned char* read_http_response(int sock){
     ssize_t received = 0;
     unsigned char buffer[1024];
 
-    do {
+    while(true) {
         // null terminate the chunk buffer
         memset(buffer, 0, sizeof(buffer));
         // read the response_file in chunks
         received = read(sock, buffer, sizeof(buffer));
         // allocate memory for the response_file
+        if(received <= 0)
+            break;
         response = realloc(response, total + received + 1);
         if (response == NULL) {
             perror("realloc");
             close(sock);
-            return NULL;
+            free(response);
+            response = NULL;
+            return response;
         }
         // copy the chunk to the response_file buffer
         memcpy(response + total, buffer, received);
         // update the total number of bytes read
         total += received;
-    } while (received > 0);
+    }
 
     // if received is -1, then there was an error
     if (received < 0) {
         perror("read");
         close(sock);
-        return NULL;
+        free(response);
+        response = NULL;
+        return response;
+    }
+
+    // Null-terminate the response buffer
+    if (response != NULL) {
+        response[total] = '\0';
     }
 
     printf("%s", response);
@@ -167,7 +226,7 @@ unsigned char* read_http_response(int sock){
     return response;
 }
 
-void parse_console(int argc, char* argv[], URL* url, char** query_string){
+int parse_console(int argc, char* argv[], URL* url, char** query_string){
     int status;
     int n = 0;
 
@@ -176,27 +235,27 @@ void parse_console(int argc, char* argv[], URL* url, char** query_string){
             // query arguments come first
             if (argv[1][1] != 'r') {
                 print_usage();
-                exit(1);
+                return INVALID_FORMAT;
             }
             // must have argument n after -r:
             if (!isInteger(argv[2], &n)) {
                 print_usage();
-                exit(1);
+                return INVALID_FORMAT;
             }
 
             status = build_query_string(argv, n, 3, query_string);
             switch (status) {
                 case MEMORY_ERROR:
                     perror("malloc");
-                    exit(1);
+                    return MEMORY_ERROR;
                 case INVALID_FORMAT:
                     print_usage();
-                    exit(EXIT_FAILURE);
+                    return INVALID_FORMAT;
             }
 
             if (validate_and_parse_url(argv[argc - 1], url) != 0) {
                 print_usage();
-                exit(EXIT_FAILURE);
+                return INVALID_FORMAT;
             }
             break;
 
@@ -204,34 +263,35 @@ void parse_console(int argc, char* argv[], URL* url, char** query_string){
             // url come first
             if (validate_and_parse_url(argv[1], url) != 0) {
                 print_usage();
-                exit(EXIT_FAILURE);
+                return INVALID_FORMAT;
             }
 
             if (argv[2] != NULL && argv[2][0] == '-') {
                 // must have r after -
                 if (argv[2][1] != 'r') {
                     print_usage();
-                    exit(1);
+                    return INVALID_FORMAT;
                 }
 
                 // must have argument n after -r:
                 if (!isInteger(argv[3], &n)) {
                     print_usage();
-                    exit(1);
+                    return INVALID_FORMAT;
                 }
 
                 status = build_query_string(argv, n, 4, query_string);
                 switch (status) {
                     case MEMORY_ERROR:
                         perror("malloc");
-                        exit(1);
+                        return MEMORY_ERROR;
                     case INVALID_FORMAT:
                         print_usage();
-                        exit(EXIT_FAILURE);
+                        return INVALID_FORMAT;
                 }
             }
             break;
     }
+    return SUCCESS;
 }
 
 char* strcasestr_custom(const char* haystack, const char* needle){
@@ -251,36 +311,47 @@ char* strcasestr_custom(const char* haystack, const char* needle){
     return NULL;
 }
 
-void check_redirection(unsigned char* response, char* result){
-    int status_code;
-    if (sscanf((const char*) response, "HTTP/%*d.%*d %d", &status_code) == 1){
-        if (status_code == 200)
-            result[0] = '\0';
-        if (status_code >= 300 && status_code < 400){
-            char* loc_start = strcasestr_custom((const char*) response, "location:");
-            if(loc_start){
-                char loc[256];
-                if(sscanf(loc_start, "location: %255[^\r\n]", loc) == 1
-                    || sscanf(loc_start, "Location: %255[^\r\n]", loc) == 1){
-                    strcpy(result, loc);
-                }
+int check_redirection(unsigned char* response, char** result){
+    if (strncmp((const char*) response, "HTTP/1.1 3", 10) == 0){
+        char* loc_start = strcasestr_custom((const char*) response, "location:");
+        if(loc_start){
+            loc_start += 9; // Skip "location:"
+            while(isspace((unsigned char)*loc_start)) loc_start++; // Skip leading whitespaces
+
+            const char* loc_end = loc_start;
+            while(*loc_end && *loc_end != '\r' && *loc_end != '\n') loc_end++; // Find end of the header line
+
+            size_t loc_length = loc_end - loc_start;
+            *result = (char*) malloc(loc_length + 1);
+            if(*result == NULL){
+                return MEMORY_ERROR;
             }
-            else
-                result[0] = '\0';
+
+            strncpy(*result, loc_start, loc_length);
+            (*result)[loc_length] = '\0';
+            return SUCCESS;
         }
         else
-            result[0] = '\0';
+            return 1; // No header found
     }
+
+    return 1; // Not a redirect status code
 }
 
-void free_pointers(unsigned char** response, char** query_string){
+void free_pointers(unsigned char** response, char** query_string, char** location){
     if(query_string != NULL && (*query_string) != NULL && strlen(*query_string) > 0) {
         free(*query_string);
         *query_string = NULL;
     }
+
     if(response != NULL && (*response) != NULL) {
         free(*response);
         *response = NULL;
+    }
+
+    if(location != NULL && (*location) != NULL){
+        free(*location);
+        *location = NULL;
     }
 }
 
@@ -326,7 +397,6 @@ int validate_and_parse_url(char *url, URL* url_struct) {
             return -1;
         }
 
-        //TODO: check about port handling
         port = atoi(port_start);
         if (port <= 0 || port >= 65536) {
             return -1;
@@ -348,11 +418,13 @@ int validate_and_parse_url(char *url, URL* url_struct) {
 }
 
 int build_query_string(char* argv[], int n, int index, char** result){
+    if(n == 0)
+        return SUCCESS;
 
     int end_of_params_index = index + n;
 
     // Calculate required buffer size
-    int total_len = 1;  // Start with 1 for the '?'
+    size_t total_len = 1;  // Start with 1 for the '?'
     for (int i = index; i < end_of_params_index; i++) {  // Start from the given index
         if (argv[i] == NULL || strstr(argv[i], "http://") != NULL)
             // few too many arguments than specified
@@ -366,6 +438,7 @@ int build_query_string(char* argv[], int n, int index, char** result){
 
     *result = (char*)malloc(sizeof(char) * total_len);
     if (*result == NULL) {
+        perror("malloc");
         return MEMORY_ERROR;
     }
 
