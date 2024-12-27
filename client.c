@@ -117,9 +117,18 @@ int main(int argc, char* argv[]) {
 }
 
 int send_http_request(URL url, char* query_string){
-    char request[1024];
+    // Calculate the size required for the request string
+    int size = snprintf(NULL, 0, "GET /%s%s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n", url.path, query_string,
+                        url.domain);
+
+    char* request = (char*) malloc(size + 1); // +1 for null terminator
+    if(!request){
+        perror("malloc");
+        return -1;
+    }
+
     // null-terminate the request buffer
-    memset(request, 0, sizeof(request));
+    memset(request, 0, strlen(request));
 
     sprintf(request, "GET /%s%s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n", url.path, query_string,
             url.domain);
@@ -134,6 +143,7 @@ int send_http_request(URL url, char* query_string){
     sock = socket(AF_INET, SOCK_STREAM, 0);
     if (sock < 0) {
         perror("socket");
+        free(request);
         return -1;
     }
 
@@ -142,6 +152,7 @@ int send_http_request(URL url, char* query_string){
     if (!server) {
         herror("gethostbyname");
         close(sock);
+        free(request);
         return -1;
     }
 
@@ -157,6 +168,7 @@ int send_http_request(URL url, char* query_string){
     if (connect(sock, (struct sockaddr *) &server_addr, sizeof(server_addr)) < 0) {
         perror("connect");
         close(sock);
+        free(request);
         return -1;
     }
 
@@ -168,11 +180,13 @@ int send_http_request(URL url, char* query_string){
         if (bytes_sent < 0) {
             perror("write");
             close(sock);
+            free(request);
             return -1;
         }
         total_sent += bytes_sent;
     }
 
+    free(request);
     return sock;
 }
 
