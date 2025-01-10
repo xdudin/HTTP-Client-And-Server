@@ -140,7 +140,7 @@ void* do_work(void* p){
             tp->qsize--;
         }
 
-        if(tp->qsize == 0)
+        if(tp->qsize == 0 && tp->dont_accept)
             pthread_cond_signal(&tp->q_empty);
         if(tp->qsize < tp->max_qsize)
             pthread_cond_signal(&tp->q_not_full);
