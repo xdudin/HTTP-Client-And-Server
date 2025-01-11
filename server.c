@@ -13,29 +13,29 @@
 #define RFC1123FMT "%a, %d %b %Y %H:%M:%S GMT"
 #define INITIAL_BUFFER_SIZE 8192
 #define FIRST_LINE_SIZE 4000
-#define HTTP_400_BODY "<HTML><HEAD><TITLE>400 Bad Request</TITLE></HEAD>" \
-                      "<BODY><H4>400 Bad request</H4>"                  \
-                      "Bad Request."                                    \
+#define HTTP_400_BODY "<HTML><HEAD><TITLE>400 Bad Request</TITLE></HEAD>\r\n" \
+                      "<BODY><H4>400 Bad request</H4>\r\n"                  \
+                      "Bad Request.\r\n"                                    \
                       "</BODY></HTML>"
-#define HTTP_302_BODY "<HTML><HEAD><TITLE>302 Found</TITLE></HEAD>" \
-                        "<BODY><H4>302 Found</H4>"  \
-                        "Directories must end with a slash."    \
+#define HTTP_302_BODY "<HTML><HEAD><TITLE>302 Found</TITLE></HEAD>\r\n" \
+                        "<BODY><H4>302 Found</H4>\r\n"  \
+                        "Directories must end with a slash.\r\n"    \
                         "</BODY></HTML>"
-#define HTTP_403_BODY "<HTML><HEAD><TITLE>403 Forbidden</TITLE></HEAD>" \
-                        "<BODY><H4>403 Forbidden</H4>" \
-                        "Access denied." \
+#define HTTP_403_BODY "<HTML><HEAD><TITLE>403 Forbidden</TITLE></HEAD>\r\n" \
+                        "<BODY><H4>403 Forbidden</H4>\r\n" \
+                        "Access denied.\r\n" \
                         "</BODY></HTML>"
-#define HTTP_404_BODY "<HTML><HEAD><TITLE>404 Not Found</TITLE></HEAD>" \
-                        "<BODY><H4>404 Not Found</H4>" \
-                        "File not found." \
+#define HTTP_404_BODY "<HTML><HEAD><TITLE>404 Not Found</TITLE></HEAD>\r\n" \
+                        "<BODY><H4>404 Not Found</H4>\r\n" \
+                        "File not found.\r\n" \
                         "</BODY></HTML>"
-#define HTTP_500_BODY "<HTML><HEAD><TITLE>500 Internal Server Error</TITLE></HEAD>" \
-                        "<BODY><H4>500 Internal Server Error</H4>" \
-                        "Some server side error." \
-                        "</BODY></HTML>"""
-#define HTTP_501_BODY "<HTML><HEAD><TITLE>501 Not supported</TITLE></HEAD>" \
-                        "<BODY><H4>501 Not supported</H4>" \
-                        "Method is not supported." \
+#define HTTP_500_BODY "<HTML><HEAD><TITLE>500 Internal Server Error</TITLE></HEAD>\r\n" \
+                        "<BODY><H4>500 Internal Server Error</H4>\r\n" \
+                        "Some server side error.\r\n" \
+                        "</BODY></HTML>"
+#define HTTP_501_BODY "<HTML><HEAD><TITLE>501 Not supported</TITLE></HEAD>\r\n" \
+                        "<BODY><H4>501 Not supported</H4>\r\n" \
+                        "Method is not supported.\r\n" \
                         "</BODY></HTML>"
 
 #if DEBUG
@@ -56,28 +56,15 @@ int parse_request(char* first_line, request_st* client_request);
 int find_index_html(const char* dir_path);
 int has_execute_permissions(const char* path);
 void construct_response(int client_fd, int status_code, char* path);
-void get_current_date(char* timebuf);
+void get_current_date(char* timebuf, size_t buff_size);
 char *get_mime_type(char *name);
 void write_to_client(int client_fd, char* buffer);
-int generate_directory_listing(const char *dir_path, char **html_body);
-
-int is_directory(const char *path) {
-    struct stat path_stat;
-    stat(path, &path_stat);
-    return S_ISDIR(path_stat.st_mode);
-}
-
-char *get_last_modified_date(const char *path) {
-    static char timebuf[128];
-    struct stat file_stat;
-
-    if (stat(path, &file_stat) == -1)
-        return NULL;
-
-    strftime(timebuf, sizeof(timebuf), RFC1123FMT, gmtime(&file_stat.st_mtime));
-
-    return timebuf;
-}
+int generate_directory_listing(const char *dir_path, char **html_body, int* is_allocated);
+void send_internal_error_response(int client_fd);
+int get_absolute_path(char *relative_path);
+int is_directory(const char *path);
+char *get_last_modified_date(const char *path);
+int open_read_file(char **body, char* path, int *is_allocated);
 
 int handle_request(void *arg) {
     int client_fd = *(int *)arg;
@@ -88,6 +75,8 @@ int handle_request(void *arg) {
     int first_line_found = 0;
     char* end_of_line;
     char first_line[FIRST_LINE_SIZE];
+    int status_code;
+
     while((bytes_read = read(client_fd, &first_line[total_bytes_read], FIRST_LINE_SIZE)) > 0){
         total_bytes_read += bytes_read;
         first_line[total_bytes_read] = '\0'; // Null-terminate the buffer for safety
@@ -111,25 +100,15 @@ int handle_request(void *arg) {
     DEBUG_PRINT("First line of the request:\n%s\n", first_line);
 
     request_st client_request = {0};
-    int status_code = parse_request(first_line, &client_request);
 
-    switch (status_code){
-        case 400:
-            construct_response(client_fd, 400, client_request.path);
-        case 501:
-            construct_response(client_fd, 501, client_request.path);
-        case 404:
-            construct_response(client_fd, 404, client_request.path);
-        case 302:
-            construct_response(client_fd, 302, client_request.path);
-        case 403:
-            construct_response(client_fd, 400, client_request.path);
-        case 200:
-            construct_response(client_fd, 200, client_request.path);
-    }
+    status_code = parse_request(first_line, &client_request);
+
+    // Construct absolute path
+    construct_response(client_fd, status_code, client_request.path);
 
     close(client_fd);
     free(arg);
+    DEBUG_PRINT("%d finished handling client with socket fd %d\n", (int)pthread_self(), client_fd);
     return 0;
 }
 
@@ -205,42 +184,28 @@ int main(int argc, char* argv[]){
         DEBUG_PRINT("Accepted incoming connection with client IP: %s\n", inet_ntoa(address.sin_addr));
     }
 
-    // Echo back messages from the client
-//    while (1) {
-//        memset(buffer, 0, BUFFER_SIZE);
-//        int read_size = read(client_fd, buffer, BUFFER_SIZE);
-//        if (read_size <= 0) {
-//            printf("Client disconnected\n");
-//            break;
-//        }
-//        printf("Received: %s", buffer);
-//        int i = 0;
-//        while(*(buffer + i)){
-//            char ch = toupper(buffer[i]);
-//            buffer[i++] = ch;
-//        }
-//        send(client_fd, buffer, strlen(buffer), 0);
-//    }
-
     // Close the connections
-    close(client_fd);
-    close(server_fd);
     destroy_threadpool(tp);
+    close(server_fd);
     return 0;
 }
 
 int parse_request(char* first_line, request_st* client_request){
     // Check if the request line contains 3 parts
-    if (sscanf(first_line, "%s %s %s", client_request->method, client_request->path, client_request->version) != 3){
+    if (sscanf(first_line, "%s %s %s", client_request->method, client_request->path, client_request->version) != 3)
         return 400;
-    }
+
     // Check if the version is of HTTP
-    if (strstr(client_request->version, "HTTP/") != 0){
+    if (strstr(client_request->version, "HTTP/") == NULL)
         return 400;
-    }
+
     // Check if the method is GET
-    if (strstr(client_request->method, "GET") != 0)
+    if (strstr(client_request->method, "GET") == NULL)
         return 501;
+
+    // Construct absolute path
+    if (get_absolute_path(client_request->path) != 0)
+        return 500;
 
     struct stat path_stat;
     // Check if the requested path exists
@@ -263,7 +228,7 @@ int parse_request(char* first_line, request_st* client_request){
     if (!S_ISREG(path_stat.st_mode) || !(path_stat.st_mode & S_IROTH))
         return 403; // Not a regular file or has no read permissions for everyone
 
-    if (strstr(client_request->path, "/") == 0){
+    if (strchr(client_request->path, '/') != NULL){
         // The file is in some directory
         return has_execute_permissions(client_request->path);
     }
@@ -290,7 +255,9 @@ int has_execute_permissions(const char* path){
     struct stat dir_stat;
 
     while (strcmp(dir, "/") != 0) {
-        if (stat(dir, &dir_stat) != 0 || !(dir_stat.st_mode & S_IXOTH)) {
+        if (stat(dir, &dir_stat) != 0 || !(dir_stat.st_mode & S_IXOTH) ||
+                                                  !(dir_stat.st_mode & S_IXGRP) ||
+                                                  !(dir_stat.st_mode & S_IXUSR)) {
             return 403;  // Directory not executable
         }
         dir = dirname(dir);
@@ -306,6 +273,7 @@ void construct_response(int client_fd, int status_code, char* path){
     char status_line[64];
     char headers[1024];
     char* body = NULL;
+    int is_allocated = 0;
 
     switch (status_code){
         case 400: status_phrase = "400 Bad Request"; body = HTTP_400_BODY; break;
@@ -316,21 +284,20 @@ void construct_response(int client_fd, int status_code, char* path){
         case 200: status_phrase = "200 OK"; break;
     }
 
-    get_current_date(timebuf);
+    // Get the current date time
+    get_current_date(timebuf, sizeof(timebuf));
+    DEBUG_PRINT("Current time: \n%s\n", timebuf);
     strcat(timebuf, "\r\n");
 
-    // Construct the status line
-    snprintf(status_line, sizeof(status_line), "HTTP/1.0 %s\r\n", status_phrase);
-
-    char location_header[strlen(path) + 12];    // To handle the size of "Location: <path>\r\n"
-    if (status_code == 302){
+    // Construct the location header if dealing with 302 response
+    char location_header[strlen(path) + 12 + 1];    // To handle the size of "Location: <path>\r\n"
+    if (status_code == 302)
         snprintf(location_header, sizeof(location_header), "Location: %s\r\n", path);
-    }
 
-    // Get content type and length
-    char* content_type = "text/html";
+    // Get content type
+    char content_type[20] = "text/html";
 
-    // Construct OK body response (reads the requested file)
+    // Construct 200 OK body response (reads the requested file / returns directory listing)
     if (status_code == 200) {
         char full_path[1024];
         // Check if path is a directory
@@ -340,58 +307,37 @@ void construct_response(int client_fd, int status_code, char* path){
             else {
                 // case of directory listing
                 strcpy(full_path, path);
-                if (generate_directory_listing(path, &body) != 0) {
-                    status_phrase = "500 Internal Server Error";
-                    status_code = 500;
+                if (generate_directory_listing(path, &body, &is_allocated) != 0) {
+                    send_internal_error_response(client_fd);
                     goto end;
                 }
-                last_modified = get_last_modified_date(path);
             }
         }
         else {
             // If it's a file, check MIME type
             strcpy(full_path, path);
-            content_type = get_mime_type(full_path);
-            last_modified = get_last_modified_date(path);
-        }
+            char* res;
+            if ((res = get_mime_type(full_path)) == NULL)
+                content_type[0] = '\0';
+            else
+                strcpy(content_type, res);
 
-        // Open the file
-        FILE *file = fopen(full_path, "rb");
-        if (!file) {
-            content_type = "text/html";
-            body = HTTP_500_BODY;
-            status_phrase = "500 Internal Server Error";
-            status_code = 500;
-            goto end;
+            if (open_read_file(&body, full_path, &is_allocated) != 0) {
+                send_internal_error_response(client_fd);
+                goto end;
+            }
+            DEBUG_PRINT("Content of the file %s: %s\n", full_path, body);
         }
-        // Get the file size
-        fseek(file, 0, SEEK_END);
-        long file_size = ftell(file);
-        fseek(file, 0, SEEK_SET);  // Rewind to the beginning of the file
-
-        // Dynamically allocate memory for the body buffer
-        body = (char *)malloc(file_size);
-        if (!body) {
-            content_type = "text/html";
-            body = HTTP_500_BODY;
-            status_phrase = "500 Internal Server Error";
-            status_code = 500;
-            fclose(file);
-            goto end;
-        }
-
-        // Read the file into the body buffer
-        fread(body, 1, file_size, file);
-        fclose(file);
+        last_modified = get_last_modified_date(full_path);
     }
 
-    end:
+    char contentType_header[256];  // New buffer for the full header
+    if (content_type[0] != '\0')
+        snprintf(contentType_header, sizeof(contentType_header), "Content-Type: %s\r\n", content_type);
 
-    if (content_type)
-        strcat(content_type, "\r\n");
-
+    char modify_header[256];  // New buffer for the full header
     if (last_modified){
-        sprintf(last_modified, "Last-Modified: %s\r\n", last_modified);
+        sprintf(modify_header, "Last-Modified: %s\r\n", last_modified);
     }
 
     // Construct the status line
@@ -408,27 +354,86 @@ void construct_response(int client_fd, int status_code, char* path){
              "Connection: close\r\n\r\n",
              timebuf,
              status_code == 302 ? location_header : "",
-             content_type ? content_type : "",
+             content_type[0] != '\0' ? contentType_header : "",
              strlen(body),
-             last_modified ? last_modified : "");
+             last_modified ? modify_header : "");
 
-    // Send the response headers (and body)
-    write_to_client(client_fd, status_line);
-    //write(client_fd, status_line, strlen(status_line));
-    write_to_client(client_fd, headers);
-    //write(client_fd, headers, strlen(headers));
-    write_to_client(client_fd, body);
-    //write(client_fd, body, strlen(body));
+    size_t total_size = strlen(status_line) + strlen(headers) + strlen(body) + 1;
+    char *response = (char*) malloc(total_size);
+    if (response == NULL) {
+        send_internal_error_response(client_fd);
+        goto end;
+    }
 
-    free(body);
+    // Construct the full response and write to client
+    snprintf(response, total_size, "%s%s%s", status_line, headers, body);
+    write_to_client(client_fd, response);
+
+    end:
+    if(is_allocated)
+        free(body);
 
     return;
 }
 
-void get_current_date(char* timebuf){
+int open_read_file(char **body, char* path, int *is_allocated){
+    // Open the file
+    FILE *file = fopen(path, "rb");
+    if (!file) {
+        return -1;
+    }
+    // Get the file size
+    fseek(file, 0, SEEK_END);
+    long file_size = ftell(file);
+    fseek(file, 0, SEEK_SET);  // Rewind to the beginning of the file
+
+    DEBUG_PRINT("File Size: %ld\n", file_size);
+    // Dynamically allocate memory for the body buffer
+    *body = (char *)malloc(file_size + 1);
+    if (!*body) {
+        fclose(file);
+        return -1;
+    }
+
+    *is_allocated = 1;
+    // Read the file into the body buffer
+    fread(*body, 1, file_size, file);
+    (*body)[file_size] = '\0';
+    fclose(file);
+    return 0;
+}
+
+void send_internal_error_response(int client_fd){
+    char body[] = HTTP_500_BODY;
+    char status_line[] = "HTTP/1.0 500 Internal Server Error";
+    char headers[1024];
+    char timebuf[128];
+    get_current_date(timebuf, sizeof (timebuf));
+    snprintf(headers, sizeof(headers),
+             "Server: webserver/1.0\r\n"
+             "Date: %s"
+             "Content-Type: text/html\r\n"   // Content-type
+             "Content-Length: %ld\r\n"
+             "Connection: close\r\n\r\n",
+             timebuf,
+             strlen(body));
+
+    size_t total_size = strlen(status_line) + strlen(headers) + strlen(body);
+    char *response = (char*) malloc(total_size);
+    if (response == NULL) {
+        send_internal_error_response(client_fd);
+        return;
+    }
+    snprintf(response, total_size, "%s%s%s", status_line, headers, body);
+    write_to_client(client_fd, response);
+    free(response);
+}
+
+void get_current_date(char* timebuf, size_t buff_size){
     time_t now;
+
     now = time(NULL);
-    strftime(timebuf, sizeof(timebuf), RFC1123FMT, gmtime(&now));
+    strftime(timebuf, buff_size, RFC1123FMT, gmtime(&now));
     // timebuf holds the correct format of the current time
 }
 
@@ -465,7 +470,7 @@ void write_to_client(int client_fd, char* buffer){
     }
 }
 
-int generate_directory_listing(const char *dir_path, char **html_body) {
+int generate_directory_listing(const char *dir_path, char **html_body, int* is_allocated) {
     size_t buffer_size = INITIAL_BUFFER_SIZE;
     size_t used_size = 0;
     *html_body = (char*)malloc(buffer_size);
@@ -473,6 +478,8 @@ int generate_directory_listing(const char *dir_path, char **html_body) {
         *html_body = HTTP_500_BODY;
         return -1;
     }
+
+    *is_allocated = 1;  // signal that body pointer has been allocated
     DIR *dir;
     struct dirent *entry;
     struct stat file_stat;
@@ -492,13 +499,14 @@ int generate_directory_listing(const char *dir_path, char **html_body) {
     // Open the directory
     dir = opendir(dir_path);
     if (!dir) {
-        *html_body = HTTP_500_BODY;
+        strcpy(*html_body, HTTP_500_BODY);
         return -1;
     }
 
+    // TODO: Check why readdir gets some empty files for some reason
     // Iterate through directory entries
     while ((entry = readdir(dir)) != NULL) {
-        snprintf(full_path, sizeof(full_path), "%s/%s", dir_path, entry->d_name);
+        snprintf(full_path, sizeof(full_path), "%s%s", dir_path, entry->d_name);
 
         if (stat(full_path, &file_stat) == -1) {
             continue; // Skip entries we cannot stat
@@ -507,6 +515,7 @@ int generate_directory_listing(const char *dir_path, char **html_body) {
         // Format modification time
         strftime(time_buf, sizeof(time_buf), RFC1123FMT, gmtime(&file_stat.st_mtime));
 
+        // Extract size of file
         const char *size_str = S_ISREG(file_stat.st_mode) ?
                                (sprintf(full_path, "%ld", file_stat.st_size), full_path) : "";
 
@@ -520,7 +529,7 @@ int generate_directory_listing(const char *dir_path, char **html_body) {
             buffer_size *= 2;
             char *new_html = realloc(*html_body, buffer_size);
             if (!new_html) {
-                *html_body = HTTP_500_BODY;
+                strcpy(*html_body, HTTP_500_BODY);
                 return -1;
             }
             *html_body = new_html;
@@ -540,7 +549,7 @@ int generate_directory_listing(const char *dir_path, char **html_body) {
         buffer_size += 64;
         char *new_html = realloc(*html_body, buffer_size);
         if (!new_html) {
-            *html_body = HTTP_500_BODY;
+            strcpy(*html_body, HTTP_500_BODY);
             return -1;
         }
         *html_body = new_html;
@@ -550,4 +559,40 @@ int generate_directory_listing(const char *dir_path, char **html_body) {
                           "</table>\r\n<HR>\r\n<ADDRESS>webserver/1.0</ADDRESS>\r\n</BODY></HTML>\r\n");
 
     return 0;
+}
+
+int get_absolute_path(char *relative_path){
+    char cwd[PATH_MAX]; // Buffer for the current working directory
+
+    // Get the current working directory
+    if (getcwd(cwd, sizeof(cwd)) == NULL) {
+        return -1;
+    }
+    DEBUG_PRINT("Absolute path of server directory: \n%s\n", cwd);
+    // Create a new path with cwd + relative_path
+    char new_path[PATH_MAX];
+    snprintf(new_path, sizeof(new_path), "%s%s", cwd, relative_path);
+    strcpy(relative_path, new_path);
+    DEBUG_PRINT("Absolute path with requested file/directory \n%s\n", relative_path);
+    return 0;
+}
+
+char *get_last_modified_date(const char *path) {
+    static char timebuf[128];
+    struct tm tm_info;
+    struct stat file_stat;
+
+    if (stat(path, &file_stat) == -1)
+        return NULL;
+
+    gmtime_r(&file_stat.st_mtime, &tm_info);
+    strftime(timebuf, sizeof(timebuf), RFC1123FMT, &tm_info);
+
+    return timebuf;
+}
+
+int is_directory(const char *path) {
+    struct stat path_stat;
+    stat(path, &path_stat);
+    return S_ISDIR(path_stat.st_mode);
 }
