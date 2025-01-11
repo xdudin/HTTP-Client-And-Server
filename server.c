@@ -103,7 +103,7 @@ int handle_request(void *arg) {
 
     status_code = parse_request(first_line, &client_request);
 
-    // Construct absolute path
+    // Construct response
     construct_response(client_fd, status_code, client_request.path);
 
     close(client_fd);
@@ -217,6 +217,8 @@ int parse_request(char* first_line, request_st* client_request){
     if (S_ISDIR(path_stat.st_mode)){
         size_t len = strlen(client_request->path);
         if (client_request->path[len - 1] != '/'){
+            char *last_slash = strrchr(path, '/');
+            strcpy(path, last_slash);
             return 302; // Redirect needed
         }
 
