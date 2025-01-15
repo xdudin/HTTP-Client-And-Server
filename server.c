@@ -13,30 +13,6 @@
 #define RFC1123FMT "%a, %d %b %Y %H:%M:%S GMT"
 #define INITIAL_BUFFER_SIZE 8192
 #define FIRST_LINE_SIZE 4000
-char* HTTP_400_BODY = "<HTML><HEAD><TITLE>400 Bad Request</TITLE></HEAD>\r\n" \
-                      "<BODY><H4>400 Bad request</H4>\r\n"                  \
-                      "Bad Request.\r\n"                                    \
-                      "</BODY></HTML>";
-char* HTTP_302_BODY = "<HTML><HEAD><TITLE>302 Found</TITLE></HEAD>\r\n" \
-                        "<BODY><H4>302 Found</H4>\r\n"  \
-                        "Directories must end with a slash.\r\n"    \
-                        "</BODY></HTML>";
-char* HTTP_403_BODY = "<HTML><HEAD><TITLE>403 Forbidden</TITLE></HEAD>\r\n" \
-                        "<BODY><H4>403 Forbidden</H4>\r\n" \
-                        "Access denied.\r\n" \
-                        "</BODY></HTML>";
-char* HTTP_404_BODY = "<HTML><HEAD><TITLE>404 Not Found</TITLE></HEAD>\r\n" \
-                        "<BODY><H4>404 Not Found</H4>\r\n" \
-                        "File not found.\r\n" \
-                        "</BODY></HTML>";
-char* HTTP_500_BODY = "<HTML><HEAD><TITLE>500 Internal Server Error</TITLE></HEAD>\r\n" \
-                        "<BODY><H4>500 Internal Server Error</H4>\r\n" \
-                        "Some server side error.\r\n" \
-                        "</BODY></HTML>";
-char* HTTP_501_BODY = "<HTML><HEAD><TITLE>501 Not supported</TITLE></HEAD>\r\n" \
-                        "<BODY><H4>501 Not supported</H4>\r\n" \
-                        "Method is not supported.\r\n" \
-                        "</BODY></HTML>";
 
 #if DEBUG
 #define DEBUG_PRINT(fmt, ...) \
@@ -52,19 +28,20 @@ typedef struct{
     char version[FIRST_LINE_SIZE];
 }request_st;
 
+// TODO: ask about the wrong content legnth of example files
+
 int parse_request(char* first_line, request_st* client_request);
 int find_index_html(const char* dir_path);
 int has_execute_permissions(const char* path);
-void construct_response(int client_fd, int status_code, char* path);
 void get_current_date(char* timebuf, size_t buff_size);
 char *get_mime_type(char *name);
 void write_to_client(int client_fd, char* buffer);
 int generate_directory_listing(const char *dir_path, char **html_body, int* is_allocated);
-void send_internal_error_response(int client_fd);
-int get_absolute_path(char *relative_path);
 int is_directory(const char *path);
 char *get_last_modified_date(const char *path);
 int open_read_file(char **body, char* path, int *is_allocated);
+int construct_OK_body(char* path, char** body);
+char* build_http_response(int status_code, char* path, const char* body);
 
 int handle_request(void *arg) {
     int client_fd = *(int *)arg;
@@ -76,6 +53,8 @@ int handle_request(void *arg) {
     char* end_of_line;
     char first_line[FIRST_LINE_SIZE];
     int status_code;
+    char* body = NULL;
+    char* response = NULL;
 
     while((bytes_read = read(client_fd, &first_line[total_bytes_read], FIRST_LINE_SIZE)) > 0){
         total_bytes_read += bytes_read;
@@ -103,13 +82,116 @@ int handle_request(void *arg) {
 
     status_code = parse_request(first_line, &client_request);
 
+    if (status_code == 200) {
+        // Construct body for 200 responses
+        if (construct_OK_body(client_request.path, &body) != 0) {
+            response = build_http_response(500, NULL, NULL);
+            goto write;
+        }
+    }
+
     // Construct response
-    construct_response(client_fd, status_code, client_request.path);
+    response = build_http_response(status_code, client_request.path, body);
+
+    write:
+    // Send response to client
+    write_to_client(client_fd, response);
 
     close(client_fd);
     free(arg);
+    if (body)
+        free(body);
     DEBUG_PRINT("%d finished handling client with socket fd %d\n", (int)pthread_self(), client_fd);
     return 0;
+}
+
+char* build_http_response(int status_code, char* path, const char* body) {
+    const char* status_text;
+    const char* custom_message;
+    const char* error_template =
+            "<HTML><HEAD><TITLE>%d %s</TITLE></HEAD>\r\n"
+            "<BODY><H4>%d %s</H4>\r\n%s\r\n</BODY></HTML>";
+    char error_body[256] = {0};
+    const char* mime_type = NULL;
+    const char* last_modified = NULL;
+    char date_header[128];
+    char* response;
+    size_t response_size;
+
+    // Get current date
+    get_current_date(date_header, sizeof(date_header));
+
+    // Determine status text
+    switch (status_code) {
+        case 200: status_text = "OK"; break;
+        case 302: status_text = "Found"; custom_message = "Directories must end with a slash."; break;
+        case 400: status_text = "Bad Request"; custom_message = "Bad Request..";break;
+        case 403: status_text = "Forbidden"; custom_message = "Access denied."; break;
+        case 404: status_text = "Not Found"; custom_message = "File not found."; break;
+        case 500: status_text = "Internal Server Error"; custom_message = "Some server side error."; break;
+        case 501: status_text = "Not supported"; custom_message = "Method is not supported."; break;
+    }
+
+    // Handle error/redirect bodies
+    if (status_code != 200) {
+        snprintf(error_body, sizeof(error_body), error_template, status_code, status_text, status_code, status_text, custom_message);
+        mime_type = "text/html"; // Explicitly set Content-Type for error/redirect bodies
+    }
+
+    // For 200 OK, determine MIME type and last modified date from the path
+    if (status_code == 200 && path) {
+        mime_type = is_directory(path) ? "text/html" : get_mime_type(path);
+        last_modified = get_last_modified_date(path);
+    }
+
+    // Calculate the response size
+    size_t body_length = (status_code == 200 ? strlen(body) : strlen(error_body));
+    response_size = 256 + body_length; // Headers + body
+
+    // Allocate memory for the response
+    response = (char*)malloc(response_size);
+    if (!response) {
+        return build_http_response(500, NULL, NULL);
+    }
+
+    // Build the response headers
+    snprintf(response, response_size,
+             "HTTP/1.0 %d %s\r\n"
+             "Server: webserver/1.0\r\n"
+             "Date: %s\r\n",
+             status_code, status_text, date_header);
+
+    // Add Location header for 302 redirects
+    if (status_code == 302) {
+        snprintf(response + strlen(response), response_size - strlen(response),
+                 "Location: %s/\r\n", path);
+    }
+
+    // Add Content-Type header
+    if (mime_type) {
+        snprintf(response + strlen(response), response_size - strlen(response),
+                 "Content-Type: %s\r\n", mime_type);
+    }
+
+    // Add Content-Length and Connection headers
+    snprintf(response + strlen(response), response_size - strlen(response),
+             "Content-Length: %lu\r\n",
+             body_length);
+
+    // Add Last-Modified header for 200 responses
+    if (status_code == 200 && last_modified) {
+        snprintf(response + strlen(response), response_size - strlen(response),
+                 "Last-Modified: %s\r\n", last_modified);
+    }
+
+    // Add Connection header
+    snprintf(response + strlen(response), response_size - strlen(response),
+             "Connection: close\r\n\r\n");
+
+    // Add the body to the response
+    strcat(response, (status_code == 200 ? body : error_body));
+
+    return response;
 }
 
 int main(int argc, char* argv[]){
@@ -270,109 +352,24 @@ int has_execute_permissions(const char* path){
     return 200;  // OK - will serve file
 }
 
-void construct_response(int client_fd, int status_code, char* path){
-    const char *status_phrase;
-    char timebuf[128];
-    char *last_modified = NULL;
-    char status_line[64];
-    char headers[1024];
-    char* body = NULL;
+int construct_OK_body(char* path, char** body) {
     int is_allocated = 0;
 
-    switch (status_code){
-        case 400: status_phrase = "400 Bad Request"; body = HTTP_400_BODY; break;
-        case 501: status_phrase = "501 Not supported"; body = HTTP_501_BODY; break;
-        case 404: status_phrase = "404 Not Found"; body = HTTP_404_BODY; break;
-        case 403: status_phrase = "403 Forbidden"; body = HTTP_403_BODY; break;
-        case 302: status_phrase = "302 Found"; strcat(path, "/"); body = HTTP_302_BODY; break;
-        case 200: status_phrase = "200 OK"; break;
-    }
-
-    // Get the current date time
-    get_current_date(timebuf, sizeof(timebuf));
-    DEBUG_PRINT("Current time: \n%s\n", timebuf);
-    strcat(timebuf, "\r\n");
-
-    // Construct the location header if dealing with 302 response
-    char location_header[strlen(path) + 12 + 1];    // To handle the size of "Location: <path>\r\n"
-    if (status_code == 302)
-        snprintf(location_header, sizeof(location_header), "Location: %s\r\n", path);
-
-    // Get content type
-    char content_type[20] = "text/html";
-
-    // Construct 200 OK body response (reads the requested file / returns directory listing)
-    if (status_code == 200) {
-        // Check if path is a directory
         if (is_directory(path)) {
             // case of directory listing
-            if (generate_directory_listing(path, &body, &is_allocated) != 0) {
-                    send_internal_error_response(client_fd);
-                    goto end;
-                }
+            if (generate_directory_listing(path, body, &is_allocated) != 0) {
+                return -1;
+            }
         }
         else {
-            // If it's a file, check MIME type
-            char* res;
-            if ((res = get_mime_type(path)) == NULL)
-                content_type[0] = '\0';
-            else
-                strcpy(content_type, res);
             DEBUG_PRINT("Attempting to read file %s\n", path);
-            if (open_read_file(&body, path, &is_allocated) != 0) {
-                send_internal_error_response(client_fd);
-                goto end;
+            if (open_read_file(body, path, &is_allocated) != 0) {
+                return -1;
             }
-            DEBUG_PRINT("Content of the file %s: %s\n", path, body);
+            DEBUG_PRINT("Content of the file %s: %s\n", path, *body);
         }
-        last_modified = get_last_modified_date(path);
-    }
 
-    DEBUG_PRINT("-----\n");
-    char contentType_header[256];  // New buffer for the full header
-    if (content_type[0] != '\0')
-        snprintf(contentType_header, sizeof(contentType_header), "Content-Type: %s\r\n", content_type);
-
-    char modify_header[256];  // New buffer for the full header
-    if (last_modified){
-        sprintf(modify_header, "Last-Modified: %s\r\n", last_modified);
-    }
-
-    // Construct the status line
-    snprintf(status_line, sizeof(status_line), "HTTP/1.0 %s\r\n", status_phrase);
-
-    // Construct headers
-    snprintf(headers, sizeof(headers),
-             "Server: webserver/1.0\r\n"
-             "Date: %s"
-             "%s"   // Location header if exists (302 response)
-             "%s"   // Content-type if exists
-             "Content-Length: %ld\r\n"
-             "%s"   // Last modification date if exists (the body is a file or content of a directory)
-             "Connection: close\r\n\r\n",
-             timebuf,
-             status_code == 302 ? location_header : "",
-             content_type[0] != '\0' ? contentType_header : "",
-             strlen(body),
-             last_modified ? modify_header : "");
-
-    size_t total_size = strlen(status_line) + strlen(headers) + strlen(body) + 1;
-    char *response = (char*) malloc(total_size);
-    if (response == NULL) {
-        send_internal_error_response(client_fd);
-        goto end;
-    }
-
-    // Construct the full response and write to client
-    snprintf(response, total_size, "%s%s%s", status_line, headers, body);
-    write_to_client(client_fd, response);
-    free(response);
-
-    end:
-    if(is_allocated)
-        free(body);
-
-    return;
+        return 0;
 }
 
 int open_read_file(char **body, char* path, int *is_allocated){
@@ -400,32 +397,6 @@ int open_read_file(char **body, char* path, int *is_allocated){
     (*body)[file_size] = '\0';
     fclose(file);
     return 0;
-}
-
-void send_internal_error_response(int client_fd){
-    char *body = HTTP_500_BODY;
-    char status_line[] = "HTTP/1.0 500 Internal Server Error";
-    char headers[1024];
-    char timebuf[128];
-    get_current_date(timebuf, sizeof (timebuf));
-    snprintf(headers, sizeof(headers),
-             "Server: webserver/1.0\r\n"
-             "Date: %s"
-             "Content-Type: text/html\r\n"   // Content-type
-             "Content-Length: %ld\r\n"
-             "Connection: close\r\n\r\n",
-             timebuf,
-             strlen(body));
-
-    size_t total_size = strlen(status_line) + strlen(headers) + strlen(body);
-    char *response = (char*) malloc(total_size);
-    if (response == NULL) {
-        send_internal_error_response(client_fd);
-        return;
-    }
-    snprintf(response, total_size, "%s%s%s", status_line, headers, body);
-    write_to_client(client_fd, response);
-    free(response);
 }
 
 void get_current_date(char* timebuf, size_t buff_size){
@@ -461,8 +432,7 @@ void write_to_client(int client_fd, char* buffer){
         ssize_t bytes_sent = write(client_fd, buffer + total_sent, buffer_len - total_sent);
         if (bytes_sent < 0) {
             free(buffer);
-            buffer = HTTP_500_BODY;
-            write_to_client(client_fd, buffer);
+            build_http_response(500, NULL, NULL);
             return;
         }
         total_sent += bytes_sent;
@@ -474,7 +444,6 @@ int generate_directory_listing(const char *dir_path, char **html_body, int* is_a
     size_t used_size = 0;
     *html_body = (char*)malloc(buffer_size);
     if (!*html_body){
-        *html_body = HTTP_500_BODY;
         return -1;
     }
 
@@ -485,23 +454,23 @@ int generate_directory_listing(const char *dir_path, char **html_body, int* is_a
     char full_path[1024];
     char time_buf[64];
 
-    // TODO: DO WE NEED TO SHOW ABSOLUTE OR RELATIVE PATH IN DIRECTORY LISTING??
     // char* relative_path = strrchar(dir_path, '/');
 
     // Start building the HTML
     used_size += snprintf(*html_body + used_size, buffer_size - used_size,
                           "<HTML>\r\n"
-                          "<HEAD><TITLE>Index of %s</TITLE></HEAD>\r\n"
+                          "<HEAD><TITLE>Index of %s</TITLE></HEAD>\r\n\r\n"
                           "<BODY>\r\n"
-                          "<H4>Index of %s</H4>\r\n"
+                          "<H4>Index of %s</H4>\r\n\r\n"
                           "<table CELLSPACING=8>\r\n"
-                          "<tr><th>Name</th><th>Last Modified</th><th>Size</th></tr>\r\n",
+                          "<tr><th>Name</th><th>Last Modified</th><th>Size</th></tr>\r\n\r\n\r\n",
                           dir_path, dir_path);
 
     // Open the directory
     dir = opendir(dir_path);
     if (!dir) {
-        strcpy(*html_body, HTTP_500_BODY);
+        //strcpy(*html_body, HTTP_500_BODY);
+        free(*html_body);
         return -1;
     }
 
@@ -526,7 +495,7 @@ int generate_directory_listing(const char *dir_path, char **html_body, int* is_a
 
         // Estimate required size for the new row
         size_t row_size = snprintf(NULL, 0,
-                                   "<tr><td><A HREF=\"%s\">%s</A></td><td>%s</td><td>%s</td></tr>\r\n",
+                                   "<tr>\r\n<td><A HREF=\"%s\">%s</A></td><td>%s</td>\r\n<td>%s</td>\r\n</tr>\r\n\r\n",
                                    entry->d_name, entry->d_name, time_buf, size_str);
 
         // Handle buffer overflow
@@ -534,7 +503,7 @@ int generate_directory_listing(const char *dir_path, char **html_body, int* is_a
             buffer_size *= 2;
             char *new_html = realloc(*html_body, buffer_size);
             if (!new_html) {
-                strcpy(*html_body, HTTP_500_BODY);
+                free(*html_body);
                 return -1;
             }
             *html_body = new_html;
@@ -542,7 +511,7 @@ int generate_directory_listing(const char *dir_path, char **html_body, int* is_a
 
         // Add the row to the buffer
         used_size += snprintf(*html_body + used_size, buffer_size - used_size,
-                              "<tr><td><A HREF=\"%s\">%s</A></td><td>%s</td><td>%s</td></tr>\r\n",
+                              "<tr>\r\n<td><A HREF=\"%s\">%s</A></td><td>%s</td>\r\n<td>%s</td>\r\n</tr>\r\n\r\n",
                               entry->d_name, entry->d_name, time_buf, size_str);
 
     }
@@ -554,14 +523,14 @@ int generate_directory_listing(const char *dir_path, char **html_body, int* is_a
         buffer_size += 64;
         char *new_html = realloc(*html_body, buffer_size);
         if (!new_html) {
-            strcpy(*html_body, HTTP_500_BODY);
+            free(*html_body);
             return -1;
         }
         *html_body = new_html;
     }
 
     used_size += snprintf(*html_body + used_size, buffer_size - used_size,
-                          "</table>\r\n<HR>\r\n<ADDRESS>webserver/1.0</ADDRESS>\r\n</BODY></HTML>\r\n");
+                          "</table>\r\n\r\n<HR>\r\n\r\n<ADDRESS>webserver/1.0</ADDRESS>\r\n\r\n</BODY></HTML>\r\n\r\n");
 
     return 0;
 }
