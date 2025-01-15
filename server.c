@@ -13,30 +13,30 @@
 #define RFC1123FMT "%a, %d %b %Y %H:%M:%S GMT"
 #define INITIAL_BUFFER_SIZE 8192
 #define FIRST_LINE_SIZE 4000
-#define HTTP_400_BODY "<HTML><HEAD><TITLE>400 Bad Request</TITLE></HEAD>\r\n" \
+char* HTTP_400_BODY = "<HTML><HEAD><TITLE>400 Bad Request</TITLE></HEAD>\r\n" \
                       "<BODY><H4>400 Bad request</H4>\r\n"                  \
                       "Bad Request.\r\n"                                    \
-                      "</BODY></HTML>"
-#define HTTP_302_BODY "<HTML><HEAD><TITLE>302 Found</TITLE></HEAD>\r\n" \
+                      "</BODY></HTML>";
+char* HTTP_302_BODY = "<HTML><HEAD><TITLE>302 Found</TITLE></HEAD>\r\n" \
                         "<BODY><H4>302 Found</H4>\r\n"  \
                         "Directories must end with a slash.\r\n"    \
-                        "</BODY></HTML>"
-#define HTTP_403_BODY "<HTML><HEAD><TITLE>403 Forbidden</TITLE></HEAD>\r\n" \
+                        "</BODY></HTML>";
+char* HTTP_403_BODY = "<HTML><HEAD><TITLE>403 Forbidden</TITLE></HEAD>\r\n" \
                         "<BODY><H4>403 Forbidden</H4>\r\n" \
                         "Access denied.\r\n" \
-                        "</BODY></HTML>"
-#define HTTP_404_BODY "<HTML><HEAD><TITLE>404 Not Found</TITLE></HEAD>\r\n" \
+                        "</BODY></HTML>";
+char* HTTP_404_BODY = "<HTML><HEAD><TITLE>404 Not Found</TITLE></HEAD>\r\n" \
                         "<BODY><H4>404 Not Found</H4>\r\n" \
                         "File not found.\r\n" \
-                        "</BODY></HTML>"
-#define HTTP_500_BODY "<HTML><HEAD><TITLE>500 Internal Server Error</TITLE></HEAD>\r\n" \
+                        "</BODY></HTML>";
+char* HTTP_500_BODY = "<HTML><HEAD><TITLE>500 Internal Server Error</TITLE></HEAD>\r\n" \
                         "<BODY><H4>500 Internal Server Error</H4>\r\n" \
                         "Some server side error.\r\n" \
-                        "</BODY></HTML>"
-#define HTTP_501_BODY "<HTML><HEAD><TITLE>501 Not supported</TITLE></HEAD>\r\n" \
+                        "</BODY></HTML>";
+char* HTTP_501_BODY = "<HTML><HEAD><TITLE>501 Not supported</TITLE></HEAD>\r\n" \
                         "<BODY><H4>501 Not supported</H4>\r\n" \
                         "Method is not supported.\r\n" \
-                        "</BODY></HTML>"
+                        "</BODY></HTML>";
 
 #if DEBUG
 #define DEBUG_PRINT(fmt, ...) \
@@ -194,7 +194,7 @@ int parse_request(char* first_line, request_st* client_request){
     // Check if the request line contains 3 parts
     if (sscanf(first_line, "%s %s %s", client_request->method, client_request->path, client_request->version) != 3)
         return 400;
-
+    DEBUG_PRINT("Path: %s\n", client_request->path);
     // Check if the version is of HTTP
     if (strstr(client_request->version, "HTTP/") == NULL)
         return 400;
@@ -203,9 +203,8 @@ int parse_request(char* first_line, request_st* client_request){
     if (strstr(client_request->method, "GET") == NULL)
         return 501;
 
-    // Construct absolute path
-    if (get_absolute_path(client_request->path) != 0)
-        return 500;
+    if (client_request->path[0] == '/')
+        memmove(client_request->path, client_request->path + 1, sizeof(client_request->path));
 
     struct stat path_stat;
     // Check if the requested path exists
@@ -217,12 +216,14 @@ int parse_request(char* first_line, request_st* client_request){
     if (S_ISDIR(path_stat.st_mode)){
         size_t len = strlen(client_request->path);
         if (client_request->path[len - 1] != '/'){
-            char *last_slash = strrchr(path, '/');
-            strcpy(path, last_slash);
             return 302; // Redirect needed
         }
 
-        // At this point, we have a directory with trailing '/'
+        if (find_index_html(client_request->path)) {
+            // case of index.html
+            strcat(client_request->path, "index.html");
+        }
+        // At this point, we have a directory with either index.html or directory listing case
         return 200;
     }
 
@@ -256,7 +257,8 @@ int has_execute_permissions(const char* path){
     char *dir = dirname(path_copy);
     struct stat dir_stat;
 
-    while (strcmp(dir, "/") != 0) {
+    while (strcmp(dir, ".") != 0) {
+        DEBUG_PRINT("dir: %s\n", dir);
         if (stat(dir, &dir_stat) != 0 || !(dir_stat.st_mode & S_IXOTH) ||
                                                   !(dir_stat.st_mode & S_IXGRP) ||
                                                   !(dir_stat.st_mode & S_IXUSR)) {
@@ -301,38 +303,32 @@ void construct_response(int client_fd, int status_code, char* path){
 
     // Construct 200 OK body response (reads the requested file / returns directory listing)
     if (status_code == 200) {
-        char full_path[1024];
         // Check if path is a directory
         if (is_directory(path)) {
-            if (find_index_html(path))
-                snprintf(full_path, sizeof(full_path), "%s/index.html", path);
-            else {
-                // case of directory listing
-                strcpy(full_path, path);
-                if (generate_directory_listing(path, &body, &is_allocated) != 0) {
+            // case of directory listing
+            if (generate_directory_listing(path, &body, &is_allocated) != 0) {
                     send_internal_error_response(client_fd);
                     goto end;
                 }
-            }
         }
         else {
             // If it's a file, check MIME type
-            strcpy(full_path, path);
             char* res;
-            if ((res = get_mime_type(full_path)) == NULL)
+            if ((res = get_mime_type(path)) == NULL)
                 content_type[0] = '\0';
             else
                 strcpy(content_type, res);
-
-            if (open_read_file(&body, full_path, &is_allocated) != 0) {
+            DEBUG_PRINT("Attempting to read file %s\n", path);
+            if (open_read_file(&body, path, &is_allocated) != 0) {
                 send_internal_error_response(client_fd);
                 goto end;
             }
-            DEBUG_PRINT("Content of the file %s: %s\n", full_path, body);
+            DEBUG_PRINT("Content of the file %s: %s\n", path, body);
         }
-        last_modified = get_last_modified_date(full_path);
+        last_modified = get_last_modified_date(path);
     }
 
+    DEBUG_PRINT("-----\n");
     char contentType_header[256];  // New buffer for the full header
     if (content_type[0] != '\0')
         snprintf(contentType_header, sizeof(contentType_header), "Content-Type: %s\r\n", content_type);
@@ -370,6 +366,7 @@ void construct_response(int client_fd, int status_code, char* path){
     // Construct the full response and write to client
     snprintf(response, total_size, "%s%s%s", status_line, headers, body);
     write_to_client(client_fd, response);
+    free(response);
 
     end:
     if(is_allocated)
@@ -406,7 +403,7 @@ int open_read_file(char **body, char* path, int *is_allocated){
 }
 
 void send_internal_error_response(int client_fd){
-    char body[] = HTTP_500_BODY;
+    char *body = HTTP_500_BODY;
     char status_line[] = "HTTP/1.0 500 Internal Server Error";
     char headers[1024];
     char timebuf[128];
@@ -488,6 +485,9 @@ int generate_directory_listing(const char *dir_path, char **html_body, int* is_a
     char full_path[1024];
     char time_buf[64];
 
+    // TODO: DO WE NEED TO SHOW ABSOLUTE OR RELATIVE PATH IN DIRECTORY LISTING??
+    // char* relative_path = strrchar(dir_path, '/');
+
     // Start building the HTML
     used_size += snprintf(*html_body + used_size, buffer_size - used_size,
                           "<HTML>\r\n"
@@ -505,9 +505,12 @@ int generate_directory_listing(const char *dir_path, char **html_body, int* is_a
         return -1;
     }
 
-    // TODO: Check why readdir gets some empty files for some reason
     // Iterate through directory entries
     while ((entry = readdir(dir)) != NULL) {
+        // Skip through . (current directory) and .. (parent directory)
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+            continue;
+        }
         snprintf(full_path, sizeof(full_path), "%s%s", dir_path, entry->d_name);
 
         if (stat(full_path, &file_stat) == -1) {
@@ -594,7 +597,5 @@ char *get_last_modified_date(const char *path) {
 }
 
 int is_directory(const char *path) {
-    struct stat path_stat;
-    stat(path, &path_stat);
-    return S_ISDIR(path_stat.st_mode);
+    return path[strlen(path) - 1] == '/';
 }

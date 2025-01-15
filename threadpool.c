@@ -28,7 +28,6 @@ threadpool* create_threadpool(int num_threads_in_pool, int max_queue_size){
         return NULL;
     }
 
-    // TODO: perror on pthread functions?
     // Initialize synchronization primitives
     if (pthread_mutex_init(&tp->qlock, NULL) != 0) {
         free(tp->threads);
@@ -175,7 +174,7 @@ void destroy_threadpool(threadpool* destroyme){
         pthread_join(destroyme->threads[i], NULL);
     }
 
-    // Clean up the queue (if any work remains)
+    // Clean up the queue (if any work remains). shouldnt be possible though.
     work_t *current = destroyme->qhead;
     while(current != NULL){
         work_t *temp = current;
