@@ -35,16 +35,17 @@ int find_index_html(const char* dir_path);
 int has_execute_permissions(const char* path);
 void get_current_date(char* timebuf, size_t buff_size);
 char *get_mime_type(char *name);
-void write_to_client(int client_fd, char* buffer);
-int generate_directory_listing(const char *dir_path, char **html_body, int* is_allocated);
+void write_to_client(int client_fd, unsigned char* buffer, int buffer_len);
+int generate_directory_listing(const char *dir_path, char **html_body, int* is_allocated, int *body_size);
 int is_directory(const char *path);
 char *get_last_modified_date(const char *path);
-int open_read_file(char **body, char* path, int *is_allocated);
-int construct_OK_body(char* path, char** body);
-char* build_http_response(int status_code, char* path, const char* body);
+int open_read_file(unsigned char **body, char* path, int *is_allocated);
+int construct_OK_body(char* path, unsigned char** body, int *file_size);
+unsigned char* build_http_response(int status_code, char* path, const unsigned char* body, long body_size, int *response_len);
 
 int handle_request(void *arg) {
     int client_fd = *(int *)arg;
+    free(arg);
     DEBUG_PRINT("%d enters function and handles client with socket fd %d\n", (int)pthread_self(), client_fd);
 
     size_t total_bytes_read = 0;
@@ -53,8 +54,10 @@ int handle_request(void *arg) {
     char* end_of_line;
     char first_line[FIRST_LINE_SIZE];
     int status_code;
-    char* body = NULL;
-    char* response = NULL;
+    unsigned char* body = NULL;
+    int body_size = 0;
+    unsigned char* response = NULL;
+    int response_len = 0;
 
     while((bytes_read = read(client_fd, &first_line[total_bytes_read], FIRST_LINE_SIZE)) > 0){
         total_bytes_read += bytes_read;
@@ -82,30 +85,32 @@ int handle_request(void *arg) {
 
     status_code = parse_request(first_line, &client_request);
 
+    DEBUG_PRINT("Status Code: %d\n", status_code);
+
     if (status_code == 200) {
         // Construct body for 200 responses
-        if (construct_OK_body(client_request.path, &body) != 0) {
-            response = build_http_response(500, NULL, NULL);
+        if (construct_OK_body(client_request.path, &body, &body_size) != 0) {
+            response = build_http_response(500, NULL, NULL, 0, &response_len);
             goto write;
         }
     }
 
     // Construct response
-    response = build_http_response(status_code, client_request.path, body);
+    response = build_http_response(status_code, client_request.path, body, body_size, &response_len);
 
     write:
     // Send response to client
-    write_to_client(client_fd, response);
+    write_to_client(client_fd, response, response_len);
 
     close(client_fd);
-    free(arg);
     if (body)
         free(body);
+    free(response);
     DEBUG_PRINT("%d finished handling client with socket fd %d\n", (int)pthread_self(), client_fd);
     return 0;
 }
 
-char* build_http_response(int status_code, char* path, const char* body) {
+unsigned char* build_http_response(int status_code, char* path, const unsigned char* body, long body_size, int *response_len) {
     const char* status_text;
     const char* custom_message;
     const char* error_template =
@@ -115,7 +120,7 @@ char* build_http_response(int status_code, char* path, const char* body) {
     const char* mime_type = NULL;
     const char* last_modified = NULL;
     char date_header[128];
-    char* response;
+    unsigned char* response;
     size_t response_size;
 
     // Get current date
@@ -125,7 +130,7 @@ char* build_http_response(int status_code, char* path, const char* body) {
     switch (status_code) {
         case 200: status_text = "OK"; break;
         case 302: status_text = "Found"; custom_message = "Directories must end with a slash."; break;
-        case 400: status_text = "Bad Request"; custom_message = "Bad Request..";break;
+        case 400: status_text = "Bad Request"; custom_message = "Bad Request.";break;
         case 403: status_text = "Forbidden"; custom_message = "Access denied."; break;
         case 404: status_text = "Not Found"; custom_message = "File not found."; break;
         case 500: status_text = "Internal Server Error"; custom_message = "Some server side error."; break;
@@ -145,17 +150,18 @@ char* build_http_response(int status_code, char* path, const char* body) {
     }
 
     // Calculate the response size
-    size_t body_length = (status_code == 200 ? strlen(body) : strlen(error_body));
+    size_t body_length = (status_code == 200 ? body_size : strlen(error_body));
     response_size = 256 + body_length; // Headers + body
 
     // Allocate memory for the response
-    response = (char*)malloc(response_size);
+    response = (unsigned char*)malloc(response_size);
     if (!response) {
-        return build_http_response(500, NULL, NULL);
+        return build_http_response(500, NULL, NULL, 0, response_len);
     }
 
+    int written = 0;
     // Build the response headers
-    snprintf(response, response_size,
+    written += snprintf((char *)response, response_size,
              "HTTP/1.0 %d %s\r\n"
              "Server: webserver/1.0\r\n"
              "Date: %s\r\n",
@@ -163,41 +169,45 @@ char* build_http_response(int status_code, char* path, const char* body) {
 
     // Add Location header for 302 redirects
     if (status_code == 302) {
-        snprintf(response + strlen(response), response_size - strlen(response),
+        written += snprintf((char *) response + written, response_size - written,
                  "Location: %s/\r\n", path);
     }
 
     // Add Content-Type header
     if (mime_type) {
-        snprintf(response + strlen(response), response_size - strlen(response),
+        written += snprintf((char *)response + written, response_size - written,
                  "Content-Type: %s\r\n", mime_type);
     }
 
     // Add Content-Length and Connection headers
-    snprintf(response + strlen(response), response_size - strlen(response),
+    written += snprintf((char *)response + written, response_size - written,
              "Content-Length: %lu\r\n",
              body_length);
 
     // Add Last-Modified header for 200 responses
     if (status_code == 200 && last_modified) {
-        snprintf(response + strlen(response), response_size - strlen(response),
+        written += snprintf((char *)response + written, response_size - written,
                  "Last-Modified: %s\r\n", last_modified);
     }
 
     // Add Connection header
-    snprintf(response + strlen(response), response_size - strlen(response),
+    written += snprintf((char *)response + written, response_size - written,
              "Connection: close\r\n\r\n");
 
     // Add the body to the response
-    strcat(response, (status_code == 200 ? body : error_body));
+    // strcat((char *)response, (status_code == 200 ? body : error_body));
+    const unsigned char *src = (status_code == 200 ? body : (unsigned char *)error_body);
+    size_t src_len = (status_code == 200 ? body_size : strlen(error_body));
+    memcpy(response + written, src, src_len);
 
+    *response_len = written + src_len;
     return response;
 }
 
 int main(int argc, char* argv[]){
     // TODO: ask about the last argument in usage print
     if(argc != 5){
-        printf("Usage: server <port> <pool-size> <queue-size> <max-requests>\n");
+        printf("Usage: server <port> <pool-size> <max-queue-size> <max-number-of-request>\n");
         exit(EXIT_FAILURE);
     }
 
@@ -217,6 +227,7 @@ int main(int argc, char* argv[]){
     // Create socket
     if ((server_fd = socket(AF_INET, SOCK_STREAM, 0)) == 0) {
         perror("Socket failed");
+        destroy_threadpool(tp);
         exit(EXIT_FAILURE);
     }
 
@@ -229,6 +240,7 @@ int main(int argc, char* argv[]){
     if (bind(server_fd, (struct sockaddr *)&address, sizeof(address)) < 0) {
         perror("Bind failed");
         close(server_fd);
+        destroy_threadpool(tp);
         exit(EXIT_FAILURE);
     }
 
@@ -236,6 +248,7 @@ int main(int argc, char* argv[]){
     if (listen(server_fd, 3) < 0) {
         perror("Listen failed");
         close(server_fd);
+        destroy_threadpool(tp);
         exit(EXIT_FAILURE);
     }
 
@@ -266,6 +279,7 @@ int main(int argc, char* argv[]){
         DEBUG_PRINT("Accepted incoming connection with client IP: %s\n", inet_ntoa(address.sin_addr));
     }
 
+    DEBUG_PRINT("Starting to destroy threadpool...\n");
     // Close the connections
     destroy_threadpool(tp);
     close(server_fd);
@@ -352,18 +366,18 @@ int has_execute_permissions(const char* path){
     return 200;  // OK - will serve file
 }
 
-int construct_OK_body(char* path, char** body) {
+int construct_OK_body(char* path, unsigned char** body, int* file_size) {
     int is_allocated = 0;
 
         if (is_directory(path)) {
             // case of directory listing
-            if (generate_directory_listing(path, body, &is_allocated) != 0) {
+            if (generate_directory_listing(path,(char **) body, &is_allocated, file_size) != 0) {
                 return -1;
             }
         }
         else {
             DEBUG_PRINT("Attempting to read file %s\n", path);
-            if (open_read_file(body, path, &is_allocated) != 0) {
+            if (open_read_file(body, path, file_size) != 0) {
                 return -1;
             }
             DEBUG_PRINT("Content of the file %s: %s\n", path, *body);
@@ -372,7 +386,7 @@ int construct_OK_body(char* path, char** body) {
         return 0;
 }
 
-int open_read_file(char **body, char* path, int *is_allocated){
+int open_read_file(unsigned char **body, char* path, int *file_size){
     // Open the file
     FILE *file = fopen(path, "rb");
     if (!file) {
@@ -380,21 +394,20 @@ int open_read_file(char **body, char* path, int *is_allocated){
     }
     // Get the file size
     fseek(file, 0, SEEK_END);
-    long file_size = ftell(file);
+    *file_size = ftell(file);
     fseek(file, 0, SEEK_SET);  // Rewind to the beginning of the file
 
-    DEBUG_PRINT("File Size: %ld\n", file_size);
+    DEBUG_PRINT("File Size: %d\n", *file_size);
     // Dynamically allocate memory for the body buffer
-    *body = (char *)malloc(file_size + 1);
+    *body = (unsigned char *)malloc(*file_size + 1);
     if (!*body) {
         fclose(file);
         return -1;
     }
 
-    *is_allocated = 1;
     // Read the file into the body buffer
-    fread(*body, 1, file_size, file);
-    (*body)[file_size] = '\0';
+    fread(*body, 1, *file_size, file);
+    (*body)[*file_size] = '\0';
     fclose(file);
     return 0;
 }
@@ -424,22 +437,23 @@ char *get_mime_type(char *name)
     return NULL;
 }
 
-void write_to_client(int client_fd, char* buffer){
+void write_to_client(int client_fd, unsigned char* buffer, int buffer_len){
     // Send the request
     size_t total_sent = 0;
-    size_t buffer_len = strlen(buffer);
+    //size_t buffer_len = strlen(buffer);
     while (total_sent < buffer_len) {
         ssize_t bytes_sent = write(client_fd, buffer + total_sent, buffer_len - total_sent);
         if (bytes_sent < 0) {
             free(buffer);
-            build_http_response(500, NULL, NULL);
+            unsigned char* response = build_http_response(500, NULL, NULL, 0, &buffer_len);
+            write_to_client(client_fd, response, buffer_len);
             return;
         }
         total_sent += bytes_sent;
     }
 }
 
-int generate_directory_listing(const char *dir_path, char **html_body, int* is_allocated) {
+int generate_directory_listing(const char *dir_path, char **html_body, int* is_allocated, int *body_size) {
     size_t buffer_size = INITIAL_BUFFER_SIZE;
     size_t used_size = 0;
     *html_body = (char*)malloc(buffer_size);
@@ -452,9 +466,7 @@ int generate_directory_listing(const char *dir_path, char **html_body, int* is_a
     struct dirent *entry;
     struct stat file_stat;
     char full_path[1024];
-    char time_buf[64];
-
-    // char* relative_path = strrchar(dir_path, '/');
+    char time_buf[128];
 
     // Start building the HTML
     used_size += snprintf(*html_body + used_size, buffer_size - used_size,
@@ -469,7 +481,6 @@ int generate_directory_listing(const char *dir_path, char **html_body, int* is_a
     // Open the directory
     dir = opendir(dir_path);
     if (!dir) {
-        //strcpy(*html_body, HTTP_500_BODY);
         free(*html_body);
         return -1;
     }
@@ -532,6 +543,7 @@ int generate_directory_listing(const char *dir_path, char **html_body, int* is_a
     used_size += snprintf(*html_body + used_size, buffer_size - used_size,
                           "</table>\r\n\r\n<HR>\r\n\r\n<ADDRESS>webserver/1.0</ADDRESS>\r\n\r\n</BODY></HTML>\r\n\r\n");
 
+    *body_size = used_size;
     return 0;
 }
 
