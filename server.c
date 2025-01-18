@@ -36,7 +36,7 @@ int has_execute_permissions(const char* path);
 void get_current_date(char* timebuf, size_t buff_size);
 char *get_mime_type(char *name);
 void write_to_client(int client_fd, unsigned char* buffer, int buffer_len);
-int generate_directory_listing(const char *dir_path, char **html_body, int* is_allocated, int *body_size);
+int generate_directory_listing(char *dir_path, char **html_body, int* is_allocated, int *body_size);
 int is_directory(const char *path);
 char *get_last_modified_date(const char *path);
 int open_read_file(unsigned char **body, char* path, int *is_allocated);
@@ -170,7 +170,7 @@ unsigned char* build_http_response(int status_code, char* path, const unsigned c
     // Add Location header for 302 redirects
     if (status_code == 302) {
         written += snprintf((char *) response + written, response_size - written,
-                 "Location: %s/\r\n", path);
+                 "Location: /%s/\r\n", path);
     }
 
     // Add Content-Type header
@@ -195,7 +195,6 @@ unsigned char* build_http_response(int status_code, char* path, const unsigned c
              "Connection: close\r\n\r\n");
 
     // Add the body to the response
-    // strcat((char *)response, (status_code == 200 ? body : error_body));
     const unsigned char *src = (status_code == 200 ? body : (unsigned char *)error_body);
     size_t src_len = (status_code == 200 ? body_size : strlen(error_body));
     memcpy(response + written, src, src_len);
@@ -205,7 +204,6 @@ unsigned char* build_http_response(int status_code, char* path, const unsigned c
 }
 
 int main(int argc, char* argv[]){
-    // TODO: ask about the last argument in usage print
     if(argc != 5){
         printf("Usage: server <port> <pool-size> <max-queue-size> <max-number-of-request>\n");
         exit(EXIT_FAILURE);
@@ -299,8 +297,17 @@ int parse_request(char* first_line, request_st* client_request){
     if (strstr(client_request->method, "GET") == NULL)
         return 501;
 
-    if (client_request->path[0] == '/')
-        memmove(client_request->path, client_request->path + 1, sizeof(client_request->path));
+    if (client_request->path[0] == '/') {
+        if (strlen(client_request->path) > 1)
+            memmove(client_request->path, client_request->path + 1, sizeof(client_request->path));
+        else  {
+            // Case of current directory
+            if (!find_index_html("")) {
+                return 200; // Directory listing response
+            }
+            strcpy(client_request->path, "index.html");
+        }
+    }
 
     struct stat path_stat;
     // Check if the requested path exists
@@ -318,11 +325,14 @@ int parse_request(char* first_line, request_st* client_request){
         if (find_index_html(client_request->path)) {
             // case of index.html
             strcat(client_request->path, "index.html");
+            stat(client_request->path, &path_stat);
+            goto file;
         }
-        // At this point, we have a directory with either index.html or directory listing case
+        // At this point, we have a directory listing case
         return 200;
     }
 
+    file:
     // File case
     if (!S_ISREG(path_stat.st_mode) || !(path_stat.st_mode & S_IROTH))
         return 403; // Not a regular file or has no read permissions for everyone
@@ -332,7 +342,7 @@ int parse_request(char* first_line, request_st* client_request){
         return has_execute_permissions(client_request->path);
     }
 
-    // The path is the file itself
+    // The path is to a file
     return 200;
 }
 
@@ -453,7 +463,7 @@ void write_to_client(int client_fd, unsigned char* buffer, int buffer_len){
     }
 }
 
-int generate_directory_listing(const char *dir_path, char **html_body, int* is_allocated, int *body_size) {
+int generate_directory_listing(char *dir_path, char **html_body, int* is_allocated, int *body_size) {
     size_t buffer_size = INITIAL_BUFFER_SIZE;
     size_t used_size = 0;
     *html_body = (char*)malloc(buffer_size);
@@ -478,8 +488,14 @@ int generate_directory_listing(const char *dir_path, char **html_body, int* is_a
                           "<tr><th>Name</th><th>Last Modified</th><th>Size</th></tr>\r\n\r\n\r\n",
                           dir_path, dir_path);
 
-    // Open the directory
-    dir = opendir(dir_path);
+    // Check if path is current directory
+    if (strcmp(dir_path, "/") == 0) {
+        dir = opendir(".");
+        strcpy(dir_path, "");
+    }
+    else
+        dir = opendir(dir_path);
+
     if (!dir) {
         free(*html_body);
         return -1;
@@ -492,7 +508,6 @@ int generate_directory_listing(const char *dir_path, char **html_body, int* is_a
             continue;
         }
         snprintf(full_path, sizeof(full_path), "%s%s", dir_path, entry->d_name);
-
         if (stat(full_path, &file_stat) == -1) {
             continue; // Skip entries we cannot stat
         }
@@ -503,6 +518,10 @@ int generate_directory_listing(const char *dir_path, char **html_body, int* is_a
         // Extract size of file
         const char *size_str = S_ISREG(file_stat.st_mode) ?
                                (sprintf(full_path, "%ld", file_stat.st_size), full_path) : "";
+
+        // Handle directory entries with concatenating trailing /
+        if (S_ISDIR(file_stat.st_mode))
+            strcat(entry->d_name, "/");
 
         // Estimate required size for the new row
         size_t row_size = snprintf(NULL, 0,
@@ -544,6 +563,7 @@ int generate_directory_listing(const char *dir_path, char **html_body, int* is_a
                           "</table>\r\n\r\n<HR>\r\n\r\n<ADDRESS>webserver/1.0</ADDRESS>\r\n\r\n</BODY></HTML>\r\n\r\n");
 
     *body_size = used_size;
+    strcpy(dir_path, dir_path[0] == '\0' ? "/" : dir_path);
     return 0;
 }
 

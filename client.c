@@ -233,7 +233,8 @@ unsigned char *read_http_response(int sock) {
         response[total] = '\0';
     }
 
-    printf("%s", response);
+    for (int i = 0; i < total; i++)
+        printf("%c", response[i]);
     printf("\n Total received response bytes: %d\n", (int)total);
 
     close(sock);
