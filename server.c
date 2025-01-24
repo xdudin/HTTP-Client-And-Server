@@ -7,8 +7,9 @@
 #include <sys/stat.h>
 #include <libgen.h>
 #include <dirent.h>
+#include <fcntl.h>
 
-#define DEBUG 1
+#define DEBUG 0
 #define RFC1123FMT "%a, %d %b %Y %H:%M:%S GMT"
 #define INITIAL_BUFFER_SIZE 8192
 #define FIRST_LINE_SIZE 4000
@@ -22,34 +23,19 @@
         do { } while (0)
 #endif
 
-// Struct definitions
-typedef struct{
-    unsigned char *body;
-    int size;
-}body_st;
-
-typedef struct{
-    unsigned char *response;
-    int size;
-}response_st;
-
-// TODO: ask about the wrong content legnth of example files
-// TODO: ask about the permissions (others or oth+grp+usr)
-
 // Function prototypes
 int handle_client(void *arg);
-void build_http_response(int status_code, char *path, body_st *bodySt, response_st *responseSt);
-void write_to_client(int client_fd, response_st *responseSt);
-void free_structs(body_st *bodySt, response_st *responseSt);
+char *build_http_response(int status_code, char *path, int *error);
+void write_to_client(int client_fd, char *buffer);
 
 int parse_request(char *first_line, char *path);
-int construct_OK_body(char *path, body_st *bodySt);
-int open_read_file(char *path, body_st *bodySt);
-int generate_directory_listing(char *dir_path, body_st *bodySt);
+int read_and_write(int client_fd, char *path);
+int generate_directory_listing(char *dir_path, char **body);
 int find_index_html(const char *dir_path);
 int has_execute_permissions(const char *path);
 int is_directory(const char *path);
 
+int get_file_size(char *path);
 void get_current_date(char* timebuf, size_t buff_size);
 char *get_mime_type(char *name);
 char *get_last_modified_date(const char *path);
@@ -145,18 +131,12 @@ int handle_client(void *arg) {
     int bytes_read;
     int first_line_found = 0;
     char* end_of_line;
-    char first_line[FIRST_LINE_SIZE];
-    char path[FIRST_LINE_SIZE];
+    char first_line[FIRST_LINE_SIZE] = {0};
+    char path[FIRST_LINE_SIZE] = {0};
     int status_code;
-    body_st *bodySt = (body_st*) malloc(sizeof(body_st));
-    response_st *responseSt = (response_st*) malloc(sizeof(response_st));
-    if (bodySt == NULL || responseSt == NULL) {
-        response_st temp_response = {0};
-        build_http_response(500, NULL, NULL, &temp_response);
-        goto write;
-    }
+    int error = 0;
+    char *response = NULL;
 
-    bodySt->body = responseSt->response = NULL;
     while((bytes_read = read(client_fd, &first_line[total_bytes_read], FIRST_LINE_SIZE)) > 0){
         total_bytes_read += bytes_read;
         first_line[total_bytes_read] = '\0'; // Null-terminate the buffer for safety
@@ -170,7 +150,8 @@ int handle_client(void *arg) {
     }
 
     if(bytes_read < 0){
-        build_http_response(500, NULL, NULL, responseSt);
+        status_code = 500;
+        response = build_http_response(status_code, NULL, &error);
         goto write;
     }
     else if(first_line_found){
@@ -183,31 +164,27 @@ int handle_client(void *arg) {
 
     DEBUG_PRINT("Status Code: %d\n", status_code);
 
-    if (status_code == 200) {
-        // Construct body for 200 responses
-        if (construct_OK_body(path, bodySt) != 0) {
-            build_http_response(500, NULL, NULL, responseSt);
-            goto write;
-        }
-    }
-
     // Construct response
-    build_http_response(status_code, path, bodySt, responseSt);
+    response = build_http_response(status_code, path, &error);
 
     write:
-    // Send response to client
-    write_to_client(client_fd, responseSt);
+    // Write the response to client
+    write_to_client(client_fd, response);
+
+    int is_file = (!error && status_code == 200 && !is_directory(path)) ? 1 : 0;
+
+    if (is_file)
+        read_and_write(client_fd, path);
 
     close(client_fd);
-
-    free_structs(bodySt, responseSt);
+    free(response);
 
     DEBUG_PRINT("%d finished handling client with socket fd %d\n", (int)pthread_self(), client_fd);
     return 0;
 }
 
 // Build HTTP response
-void build_http_response(int status_code, char* path, body_st *bodySt, response_st *responseSt) {
+char * build_http_response(int status_code, char* path, int *error) {
     const char* status_text;
     const char* custom_message;
     const char* error_template =
@@ -217,6 +194,9 @@ void build_http_response(int status_code, char* path, body_st *bodySt, response_
     const char* mime_type = NULL;
     const char* last_modified = NULL;
     char date_header[128];
+    char *OK_body = NULL;
+    int is_file = (status_code == 200 && !is_directory(path)) ? 1 : 0;
+    int is_dir = (status_code == 200 && is_directory(path)) ? 1 : 0;
 
     // Get current date
     get_current_date(date_header, sizeof(date_header));
@@ -244,20 +224,29 @@ void build_http_response(int status_code, char* path, body_st *bodySt, response_
         last_modified = get_last_modified_date(path);
     }
 
+    if (is_file)
+        OK_body = "";
+    else if (is_dir) {
+        if (generate_directory_listing(path, &OK_body) < 0) {
+            *error = 1;
+            return build_http_response(500, NULL, error);
+        }
+    }
+
     // Calculate the response size
-    size_t body_length = (status_code == 200 ? bodySt->size : strlen(error_body));
-    responseSt->size = 256 + body_length; // Headers + body
+    size_t body_length = (status_code == 200 ? strlen(OK_body) : strlen(error_body));
+    int response_size = 256 + body_length; // Headers + body
 
     // Allocate memory for the response
-    responseSt->response = (unsigned char*) malloc(responseSt->size);
-    if (!responseSt->response) {
-        build_http_response(500, NULL, NULL, responseSt);
-        return;
+    char *response = (char*) malloc(response_size);
+    if (!response) {
+        *error = 1;
+        return build_http_response(500, NULL, error);
     }
 
     int written = 0;
     // Build the response headers
-    written += snprintf((char *)responseSt->response, responseSt->size,
+    written += snprintf(response, response_size,
              "HTTP/1.0 %d %s\r\n"
              "Server: webserver/1.0\r\n"
              "Date: %s\r\n",
@@ -265,51 +254,54 @@ void build_http_response(int status_code, char* path, body_st *bodySt, response_
 
     // Add Location header for 302 redirects
     if (status_code == 302) {
-        written += snprintf((char *) responseSt->response + written, responseSt->size - written,
+        written += snprintf(response + written, response_size - written,
                  "Location: /%s/\r\n", path);
     }
 
     // Add Content-Type header
     if (mime_type) {
-        written += snprintf((char *)responseSt->response + written, responseSt->size - written,
+        written += snprintf(response + written, response_size - written,
                  "Content-Type: %s\r\n", mime_type);
     }
 
-    // Add Content-Length and Connection headers
-    written += snprintf((char *)responseSt->response + written, responseSt->size - written,
+    // Add Content-Length header
+    size_t cont_length = is_file ? get_file_size(path) : body_length;
+    written += snprintf(response + written, response_size - written,
              "Content-Length: %lu\r\n",
-             body_length);
+             cont_length);
 
     // Add Last-Modified header for 200 responses
     if (status_code == 200 && last_modified) {
-        written += snprintf((char *)responseSt->response + written, responseSt->size - written,
+        written += snprintf(response + written, response_size - written,
                  "Last-Modified: %s\r\n", last_modified);
     }
 
     // Add Connection header
-    written += snprintf((char *)responseSt->response + written, responseSt->size - written,
+    written += snprintf(response + written, response_size - written,
              "Connection: close\r\n\r\n");
 
     // Add the body to the response
-    const unsigned char *src = (status_code == 200 ? bodySt->body : (unsigned char *)error_body);
-    size_t src_len = (status_code == 200 ? bodySt->size : strlen(error_body));
-    memcpy(responseSt->response + written, src, src_len);
+    char *src = (status_code == 200) ? OK_body : error_body;
+    written += snprintf(response + written, response_size - written,
+                        "%s", src);
 
-    responseSt->size = written + src_len;
-    return;
+    if (OK_body && strlen(OK_body) > 0)
+        free(OK_body);
+    return response;
 }
 
 // Write response to client
-void write_to_client(int client_fd, response_st *responseSt){
+void write_to_client(int client_fd, char *buffer){
     // Send the request
     size_t total_sent = 0;
-    //size_t buffer_len = strlen(buffer);
-    while (total_sent < responseSt->size) {
-        ssize_t bytes_sent = write(client_fd, responseSt->response + total_sent, responseSt->size - total_sent);
+    size_t buffer_len = strlen(buffer);
+    while (total_sent < buffer_len) {
+        ssize_t bytes_sent = write(client_fd, buffer + total_sent, buffer_len - total_sent);
         if (bytes_sent < 0) {
-            free(responseSt->response);
-            build_http_response(500, NULL, NULL, responseSt);
-            write_to_client(client_fd, responseSt);
+            int error = 1;
+            char *response = build_http_response(500, NULL, &error);
+            write_to_client(client_fd, response);
+            free(response);
             return;
         }
         total_sent += bytes_sent;
@@ -318,8 +310,8 @@ void write_to_client(int client_fd, response_st *responseSt){
 
 // Helper functions
 int parse_request(char* first_line, char* path){
-    char method[FIRST_LINE_SIZE];
-    char version[FIRST_LINE_SIZE];
+    char method[FIRST_LINE_SIZE] = {0};
+    char version[FIRST_LINE_SIZE] = {0};
     // Check if the request line contains 3 parts
     if (sscanf(first_line, "%s %s %s", method, path, version) != 3)
         return 400;
@@ -340,6 +332,7 @@ int parse_request(char* first_line, char* path){
             if (!find_index_html("")) {
                 return 200; // Directory listing response
             }
+            DEBUG_PRINT("DSADSADASDSADSADSA\n");
             strcpy(path, "index.html");
         }
     }
@@ -400,9 +393,7 @@ int has_execute_permissions(const char* path){
 
     while (strcmp(dir, ".") != 0) {
         DEBUG_PRINT("dir: %s\n", dir);
-        if (stat(dir, &dir_stat) != 0 || !(dir_stat.st_mode & S_IXOTH) ||
-                                                  !(dir_stat.st_mode & S_IXGRP) ||
-                                                  !(dir_stat.st_mode & S_IXUSR)) {
+        if (stat(dir, &dir_stat) != 0 || !(dir_stat.st_mode & S_IXOTH)) {
             return 403;  // Directory not executable
         }
         dir = dirname(dir);
@@ -411,48 +402,40 @@ int has_execute_permissions(const char* path){
     return 200;  // OK - will serve file
 }
 
-int construct_OK_body(char* path, body_st *bodySt) {
-        if (is_directory(path)) {
-            // case of directory listing
-            if (generate_directory_listing(path, bodySt) != 0) {
-                return -1;
-            }
-        }
-        else {
-            DEBUG_PRINT("Attempting to read file %s\n", path);
-            if (open_read_file(path, bodySt) != 0) {
-                return -1;
-            }
-            DEBUG_PRINT("Content of the file %s: %s\n", path, bodySt->body);
-        }
+int read_and_write(int client_fd, char *path){
+    // Open the file
+    int file_fd = open(path, O_RDONLY);
+    if(file_fd < 0)
+        return -1;
 
-        return 0;
+    char buffer[4096];
+    size_t bytesRead;
+    // Read the file into the buffer and write to client
+    while ((bytesRead = read(file_fd, buffer, sizeof(buffer))) > 0) {
+        write(client_fd, buffer, bytesRead); // Write the data
+    }
+
+    if (bytesRead < 0) {
+        close(file_fd);
+        return -1;
+    }
+
+    close(file_fd);
+    return 0;
 }
 
-int open_read_file(char *path, body_st *bodySt){
-    // Open the file
-    FILE *file = fopen(path, "rb");
+int get_file_size(char *path) {
+    FILE *file = fopen(path, "r");
     if (!file) {
         return -1;
     }
     // Get the file size
     fseek(file, 0, SEEK_END);
-    bodySt->size = ftell(file);
+    int size = ftell(file);
     fseek(file, 0, SEEK_SET);  // Rewind to the beginning of the file
 
-    DEBUG_PRINT("File Size: %d\n", bodySt->size);
-    // Dynamically allocate memory for the body buffer
-    bodySt->body = (unsigned char *)malloc(bodySt->size + 1);
-    if (!bodySt->body) {
-        fclose(file);
-        return -1;
-    }
-
-    // Read the file into the body buffer
-    fread(bodySt->body, 1, bodySt->size, file);
-    (bodySt->body)[bodySt->size] = '\0';
     fclose(file);
-    return 0;
+    return size;
 }
 
 void get_current_date(char *timebuf, size_t buff_size) {
@@ -477,11 +460,11 @@ char *get_mime_type(char *name)
     return NULL;
 }
 
-int generate_directory_listing(char *dir_path, body_st *bodySt) {
+int generate_directory_listing(char *dir_path, char **body) {
     size_t buffer_size = INITIAL_BUFFER_SIZE;
     size_t used_size = 0;
-    bodySt->body = (unsigned char*)malloc(buffer_size);
-    if (!bodySt->body){
+    *body = (char*)malloc(buffer_size);
+    if (!*body){
         return -1;
     }
 
@@ -492,7 +475,7 @@ int generate_directory_listing(char *dir_path, body_st *bodySt) {
     char time_buf[128];
 
     // Start building the HTML
-    used_size += snprintf((char *)bodySt->body + used_size, buffer_size - used_size,
+    used_size += snprintf(*body + used_size, buffer_size - used_size,
                           "<HTML>\r\n"
                           "<HEAD><TITLE>Index of %s</TITLE></HEAD>\r\n\r\n"
                           "<BODY>\r\n"
@@ -510,7 +493,7 @@ int generate_directory_listing(char *dir_path, body_st *bodySt) {
         dir = opendir(dir_path);
 
     if (!dir) {
-        free(bodySt->body);
+        free(*body);
         return -1;
     }
 
@@ -544,16 +527,16 @@ int generate_directory_listing(char *dir_path, body_st *bodySt) {
         // Handle buffer overflow
         if (used_size + row_size + 1 > buffer_size) {
             buffer_size *= 2;
-            unsigned char *new_html = realloc(bodySt->body, buffer_size);
+            char *new_html = realloc(*body, buffer_size);
             if (!new_html) {
-                free(bodySt->body);
+                free(*body);
                 return -1;
             }
-            bodySt->body = new_html;
+            *body = new_html;
         }
 
         // Add the row to the buffer
-        used_size += snprintf((char *)bodySt->body + used_size, buffer_size - used_size,
+        used_size += snprintf(*body + used_size, buffer_size - used_size,
                               "<tr>\r\n<td><A HREF=\"%s\">%s</A></td><td>%s</td>\r\n<td>%s</td>\r\n</tr>\r\n\r\n",
                               entry->d_name, entry->d_name, time_buf, size_str);
 
@@ -564,18 +547,17 @@ int generate_directory_listing(char *dir_path, body_st *bodySt) {
     // Add footer
     if (used_size + 64 > buffer_size) {
         buffer_size += 64;
-        unsigned char *new_html = realloc(bodySt->body, buffer_size);
+        char *new_html = realloc(*body, buffer_size);
         if (!new_html) {
-            free(bodySt->body);
+            free(*body);
             return -1;
         }
-        bodySt->body = new_html;
+        *body = new_html;
     }
 
-    used_size += snprintf((char *)bodySt->body + used_size, buffer_size - used_size,
+    used_size += snprintf(*body + used_size, buffer_size - used_size,
                           "</table>\r\n\r\n<HR>\r\n\r\n<ADDRESS>webserver/1.0</ADDRESS>\r\n\r\n</BODY></HTML>\r\n\r\n");
 
-    bodySt->size = used_size;
     strcpy(dir_path, dir_path[0] == '\0' ? "/" : dir_path);
     return 0;
 }
@@ -595,18 +577,7 @@ char *get_last_modified_date(const char *path) {
 }
 
 int is_directory(const char *path) {
-    return path[strlen(path) - 1] == '/';
-}
-
-void free_structs(body_st *bodySt, response_st *responseSt) {
-    if (bodySt) {
-        if (bodySt->body)
-            free(bodySt->body);
-        free(bodySt);
-    }
-    if (responseSt) {
-        if (responseSt->response)
-            free(responseSt->response);
-        free(responseSt);
-    }
+    if (path)
+        return path[strlen(path) - 1] == '/';
+    return -1;
 }
