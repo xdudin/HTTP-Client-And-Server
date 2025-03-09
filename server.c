@@ -8,19 +8,9 @@
 #include <dirent.h>
 #include <fcntl.h>
 
-#define DEBUG 0
 #define RFC1123FMT "%a, %d %b %Y %H:%M:%S GMT"
 #define INITIAL_BUFFER_SIZE 8192
 #define FIRST_LINE_SIZE 4000
-
-// Debugging macros
-#if DEBUG
-#define DEBUG_PRINT(fmt, ...) \
-        fprintf(stderr, "DEBUG: " fmt, ##__VA_ARGS__)
-#else
-#define DEBUG_PRINT(fmt, ...) \
-        do { } while (0)
-#endif
 
 // Function prototypes
 int handle_client(void *arg);
@@ -77,8 +67,6 @@ int main(int argc, char* argv[]){
         exit(EXIT_FAILURE);
     }
 
-    DEBUG_PRINT("Server listening on port %d\n", port);
-
     int requestsCounter = 0;
     while(requestsCounter < maxRequests) {
 
@@ -100,10 +88,8 @@ int main(int argc, char* argv[]){
         handle_client(client_socket);
 
         requestsCounter++;
-        DEBUG_PRINT("Accepted incoming connection with client IP: %s\n", inet_ntoa(address.sin_addr));
     }
 
-    DEBUG_PRINT("Starting to destroy threadpool...\n");
     // Close the connections
     close(server_fd);
     return 0;
@@ -113,7 +99,6 @@ int main(int argc, char* argv[]){
 int handle_client(void *arg) {
     int client_fd = *(int *)arg;
     free(arg);
-    DEBUG_PRINT("%d enters function and handles client with socket fd %d\n", (int)pthread_self(), client_fd);
     size_t total_bytes_read = 0;
     int bytes_read;
     int first_line_found = 0;
@@ -145,11 +130,7 @@ int handle_client(void *arg) {
         *end_of_line = '\0';
     }
 
-    DEBUG_PRINT("First line of the request:\n%s\n", first_line);
-
     status_code = parse_request(first_line, path);
-
-    DEBUG_PRINT("Status Code: %d\n", status_code);
 
     // Construct response
     response = build_http_response(status_code, path, &error);
@@ -166,7 +147,6 @@ int handle_client(void *arg) {
     close(client_fd);
     free(response);
 
-    DEBUG_PRINT("%d finished handling client with socket fd %d\n", (int)pthread_self(), client_fd);
     return 0;
 }
 
@@ -299,7 +279,6 @@ int parse_request(char* first_line, char* path){
     // Check if the request line contains 3 parts
     if (sscanf(first_line, "%s %s %s", method, path, version) != 3)
         return 400;
-    DEBUG_PRINT("Path: %s\n", path);
     // Check if the version is of HTTP
     if (strstr(version, "HTTP/") == NULL)
         return 400;
@@ -316,7 +295,6 @@ int parse_request(char* first_line, char* path){
             if (!find_index_html("")) {
                 return 200; // Directory listing response
             }
-            DEBUG_PRINT("DSADSADASDSADSADSA\n");
             strcpy(path, "index.html");
         }
     }
@@ -376,7 +354,6 @@ int has_execute_permissions(const char* path){
     struct stat dir_stat;
 
     while (strcmp(dir, ".") != 0) {
-        DEBUG_PRINT("dir: %s\n", dir);
         if (stat(dir, &dir_stat) != 0 || !(dir_stat.st_mode & S_IXOTH)) {
             return 403;  // Directory not executable
         }
