@@ -45,7 +45,7 @@ int main(){
         return EXIT_FAILURE;
     }
 
-    while(true) {
+    while(1) {
         int* client_socket = malloc(sizeof(int));
         if (client_socket == NULL) {
             return EXIT_FAILURE;
@@ -81,7 +81,7 @@ int handle_client(void *arg) {
     }
 
     strcpy(path, "index.html");
-    constexpr int status_code = 200;
+    const int status_code = 200;
 
     // Construct response
     char *response = build_http_response(status_code);
@@ -108,8 +108,8 @@ char * build_http_response(const int status_code) {
     char *OK_body = "";
 
     // Calculate the response size
-    constexpr size_t body_length = 0;
-    constexpr int response_size = 256 + body_length; // Headers + body
+    const size_t body_length = 0;
+    const int response_size = 256 + body_length; // Headers + body
 
     // Allocate memory for the response
     char *response = malloc(response_size);
@@ -126,7 +126,7 @@ char * build_http_response(const int status_code) {
     written += snprintf(response + written, response_size - written, "Content-Type: %s\r\n", mime_type);
 
     // Add Content-Length header
-    constexpr size_t cont_length = 27; // 27 bytes for fixed index.html
+    const size_t cont_length = 27; // 27 bytes for fixed index.html
     written += snprintf(response + written, response_size - written, "Content-Length: %lu\r\n", cont_length);
 
     // Add Connection header
