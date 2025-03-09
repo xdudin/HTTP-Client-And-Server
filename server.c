@@ -15,9 +15,9 @@
 // Function prototypes
 int handle_client(void *arg);
 char *build_http_response(int status_code, char *path);
-void write_to_client(int client_fd, char *buffer);
+void write_to_client(int client_fd, const char *buffer);
 
-int read_and_write(int client_fd, char *path);
+int read_and_write(int client_fd, const char *path);
 
 // Main function
 int main(){
@@ -69,7 +69,6 @@ int handle_client(void *arg) {
     ssize_t bytes_read;
     char first_line[FIRST_LINE_SIZE] = {0};
     char path[FIRST_LINE_SIZE] = {0};
-    int error = 0;
 
     while((bytes_read = read(client_fd, &first_line[total_bytes_read], FIRST_LINE_SIZE)) > 0){
         total_bytes_read += bytes_read;
@@ -144,25 +143,19 @@ char * build_http_response(const int status_code, char* path) {
 }
 
 // Write response to client
-void write_to_client(int client_fd, char *buffer){
+void write_to_client(const int client_fd, const char *buffer){
     // Send the request
     size_t total_sent = 0;
-    size_t buffer_len = strlen(buffer);
+    const size_t buffer_len = strlen(buffer);
     while (total_sent < buffer_len) {
-        ssize_t bytes_sent = write(client_fd, buffer + total_sent, buffer_len - total_sent);
-        if (bytes_sent < 0) {
-            char *response = build_http_response(500, nullptr);
-            write_to_client(client_fd, response);
-            free(response);
-            return;
-        }
+        const ssize_t bytes_sent = write(client_fd, buffer + total_sent, buffer_len - total_sent);
         total_sent += bytes_sent;
     }
 }
 
-int read_and_write(int client_fd, char *path){
+int read_and_write(const int client_fd, const char *path){
     // Open the file
-    int file_fd = open(path, O_RDONLY);
+    const int file_fd = open(path, O_RDONLY);
     if(file_fd < 0)
         return -1;
 
@@ -171,11 +164,6 @@ int read_and_write(int client_fd, char *path){
     // Read the file into the buffer and write to client
     while ((bytesRead = read(file_fd, buffer, sizeof(buffer))) > 0) {
         write(client_fd, buffer, bytesRead); // Write the data
-    }
-
-    if (bytesRead < 0) {
-        close(file_fd);
-        return -1;
     }
 
     close(file_fd);
