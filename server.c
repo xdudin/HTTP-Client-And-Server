@@ -8,7 +8,6 @@
 #include <dirent.h>
 #include <fcntl.h>
 
-#define RFC1123FMT "%a, %d %b %Y %H:%M:%S GMT"
 #define INITIAL_BUFFER_SIZE 8192
 #define FIRST_LINE_SIZE 4000
 
