@@ -4,7 +4,6 @@
 #include <unistd.h>
 #include <arpa/inet.h>
 #include <sys/stat.h>
-#include <libgen.h>
 #include <dirent.h>
 #include <fcntl.h>
 
@@ -20,14 +19,7 @@ void write_to_client(int client_fd, char *buffer);
 
 int parse_request(char *first_line, char *path);
 int read_and_write(int client_fd, char *path);
-int generate_directory_listing(char *dir_path, char **body);
 int find_index_html(const char *dir_path);
-int has_execute_permissions(const char *path);
-int is_directory(const char *path);
-
-int get_file_size(char *path);
-char *get_mime_type(char *name);
-char *get_last_modified_date(const char *path);
 
 // Main function
 int main(){
@@ -55,9 +47,7 @@ int main(){
         return EXIT_FAILURE;
     }
 
-    int requestsCounter = 0;
-    while(requestsCounter < MAX_REQUESTS) {
-
+    while(true) {
         int* client_socket = malloc(sizeof(int));
         if (client_socket == NULL) {
             return EXIT_FAILURE;
@@ -70,13 +60,7 @@ int main(){
 
         *client_socket = client_fd;
         handle_client(client_socket);
-
-        requestsCounter++;
     }
-
-    // Close the connections
-    close(server_fd);
-    return 0;
 }
 
 // Client handler
@@ -123,10 +107,7 @@ int handle_client(void *arg) {
     // Write the response to client
     write_to_client(client_fd, response);
 
-    const int is_file = (!error && status_code == 200 && !is_directory(path)) ? 1 : 0;
-
-    if (is_file)
-        read_and_write(client_fd, path);
+    read_and_write(client_fd, path);
 
     close(client_fd);
     free(response);
@@ -135,7 +116,7 @@ int handle_client(void *arg) {
 }
 
 // Build HTTP response
-char * build_http_response(int status_code, char* path, int *error) {
+char * build_http_response(const int status_code, char* path, int *error) {
     const char* status_text;
     const char* custom_message;
     const char* error_template =
@@ -146,8 +127,6 @@ char * build_http_response(int status_code, char* path, int *error) {
     const char* last_modified = nullptr;
     char date_header[128];
     char *OK_body = nullptr;
-    const int is_file = (status_code == 200 && !is_directory(path)) ? 1 : 0;
-    const int is_dir = (status_code == 200 && is_directory(path)) ? 1 : 0;
 
     // Determine status text
     switch (status_code) {
@@ -168,18 +147,10 @@ char * build_http_response(int status_code, char* path, int *error) {
 
     // For 200 OK, determine MIME type and last modified date from the path
     if (status_code == 200 && path) {
-        mime_type = is_directory(path) ? "text/html" : get_mime_type(path);
-        last_modified = get_last_modified_date(path);
+        mime_type = "text/html";
     }
 
-    if (is_file)
-        OK_body = "";
-    else if (is_dir) {
-        if (generate_directory_listing(path, &OK_body) < 0) {
-            *error = 1;
-            return build_http_response(500, nullptr, error);
-        }
-    }
+    OK_body = "";
 
     // Calculate the response size
     const size_t body_length = (status_code == 200 ? strlen(OK_body) : strlen(error_body));
@@ -213,7 +184,7 @@ char * build_http_response(int status_code, char* path, int *error) {
     }
 
     // Add Content-Length header
-    const size_t cont_length = is_file ? get_file_size(path) : body_length;
+    constexpr size_t cont_length = 27; // 27 bytes for fixed index.html
     written += snprintf(response + written, response_size - written,
              "Content-Length: %lu\r\n",
              cont_length);
@@ -310,7 +281,7 @@ int parse_request(char* first_line, char* path){
 
     if (strchr(path, '/') != NULL){
         // The file is in some directory
-        return has_execute_permissions(path);
+        return 200;
     }
 
     // The path is to a file
@@ -325,23 +296,6 @@ int find_index_html(const char* dir_path){
     if (stat(full_path, &file_Stat) == 0)
         return 1;
     return 0;
-}
-
-int has_execute_permissions(const char* path){
-    // Check execute permissions for all directories in path
-    char path_copy[FIRST_LINE_SIZE];
-    strncpy(path_copy, path, sizeof(path_copy));
-    char *dir = dirname(path_copy);
-    struct stat dir_stat;
-
-    while (strcmp(dir, ".") != 0) {
-        if (stat(dir, &dir_stat) != 0 || !(dir_stat.st_mode & S_IXOTH)) {
-            return 403;  // Directory not executable
-        }
-        dir = dirname(dir);
-    }
-
-    return 200;  // OK - will serve file
 }
 
 int read_and_write(int client_fd, char *path){
@@ -364,150 +318,4 @@ int read_and_write(int client_fd, char *path){
 
     close(file_fd);
     return 0;
-}
-
-int get_file_size(char *path) {
-    FILE *file = fopen(path, "r");
-    if (!file) {
-        return -1;
-    }
-    // Get the file size
-    fseek(file, 0, SEEK_END);
-    int size = ftell(file);
-    fseek(file, 0, SEEK_SET);  // Rewind to the beginning of the file
-
-    fclose(file);
-    return size;
-}
-
-char *get_mime_type(char *name)
-{
-    char *ext = strrchr(name, '.');
-    if (!ext) return NULL;
-    if (strcmp(ext, ".html") == 0 || strcmp(ext, ".htm") == 0) return "text/html";
-    if (strcmp(ext, ".jpg") == 0 || strcmp(ext, ".jpeg") == 0) return "image/jpeg";
-    if (strcmp(ext, ".gif") == 0) return "image/gif";
-    if (strcmp(ext, ".png") == 0) return "image/png";
-    if (strcmp(ext, ".css") == 0) return "text/css";
-    if (strcmp(ext, ".au") == 0) return "audio/basic";
-    if (strcmp(ext, ".wav") == 0) return "audio/wav";
-    if (strcmp(ext, ".avi") == 0) return "video/x-msvideo";
-    if (strcmp(ext, ".mpeg") == 0 || strcmp(ext, ".mpg") == 0) return "video/mpeg";
-    if (strcmp(ext, ".mp3") == 0) return "audio/mpeg";
-    return NULL;
-}
-
-int generate_directory_listing(char *dir_path, char **body) {
-    size_t buffer_size = INITIAL_BUFFER_SIZE;
-    size_t used_size = 0;
-    *body = (char*)malloc(buffer_size);
-    if (!*body){
-        return -1;
-    }
-
-    DIR *dir;
-    struct dirent *entry;
-    struct stat file_stat;
-    char full_path[1024];
-    char time_buf[128];
-
-    // Start building the HTML
-    used_size += snprintf(*body + used_size, buffer_size - used_size,
-                          "<HTML>\r\n"
-                          "<HEAD><TITLE>Index of %s</TITLE></HEAD>\r\n\r\n"
-                          "<BODY>\r\n"
-                          "<H4>Index of %s</H4>\r\n\r\n"
-                          "<table CELLSPACING=8>\r\n"
-                          "<tr><th>Name</th><th>Last Modified</th><th>Size</th></tr>\r\n\r\n\r\n",
-                          dir_path, dir_path);
-
-    // Check if path is current directory
-    if (strcmp(dir_path, "/") == 0) {
-        dir = opendir(".");
-        strcpy(dir_path, "");
-    }
-    else
-        dir = opendir(dir_path);
-
-    if (!dir) {
-        free(*body);
-        return -1;
-    }
-
-    // Iterate through directory entries
-    while ((entry = readdir(dir)) != NULL) {
-        // Skip through . (current directory) and .. (parent directory)
-        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
-            continue;
-        }
-        snprintf(full_path, sizeof(full_path), "%s%s", dir_path, entry->d_name);
-        if (stat(full_path, &file_stat) == -1) {
-            continue; // Skip entries we cannot stat
-        }
-
-        // Extract size of file
-        const char *size_str = S_ISREG(file_stat.st_mode) ?
-                               (sprintf(full_path, "%ld", file_stat.st_size), full_path) : "";
-
-        // Handle directory entries with concatenating trailing /
-        if (S_ISDIR(file_stat.st_mode))
-            strcat(entry->d_name, "/");
-
-        // Estimate required size for the new row
-        size_t row_size = snprintf(nullptr, 0,
-                                   "<tr>\r\n<td><A HREF=\"%s\">%s</A></td><td>%s</td>\r\n<td>%s</td>\r\n</tr>\r\n\r\n",
-                                   entry->d_name, entry->d_name, time_buf, size_str);
-
-        // Handle buffer overflow
-        if (used_size + row_size + 1 > buffer_size) {
-            buffer_size *= 2;
-            char *new_html = realloc(*body, buffer_size);
-            if (!new_html) {
-                free(*body);
-                return -1;
-            }
-            *body = new_html;
-        }
-
-        // Add the row to the buffer
-        used_size += snprintf(*body + used_size, buffer_size - used_size,
-                              "<tr>\r\n<td><A HREF=\"%s\">%s</A></td><td>%s</td>\r\n<td>%s</td>\r\n</tr>\r\n\r\n",
-                              entry->d_name, entry->d_name, time_buf, size_str);
-
-    }
-
-    closedir(dir);
-
-    // Add footer
-    if (used_size + 64 > buffer_size) {
-        buffer_size += 64;
-        char *new_html = realloc(*body, buffer_size);
-        if (!new_html) {
-            free(*body);
-            return -1;
-        }
-        *body = new_html;
-    }
-
-    used_size += snprintf(*body + used_size, buffer_size - used_size,
-                          "</table>\r\n\r\n<HR>\r\n\r\n<ADDRESS>webserver/1.0</ADDRESS>\r\n\r\n</BODY></HTML>\r\n\r\n");
-
-    strcpy(dir_path, dir_path[0] == '\0' ? "/" : dir_path);
-    return 0;
-}
-
-char *get_last_modified_date(const char *path) {
-    static char timebuf[128];
-    struct stat file_stat;
-
-    if (stat(path, &file_stat) == -1)
-        return nullptr;
-
-    return timebuf;
-}
-
-int is_directory(const char *path) {
-    if (path)
-        return path[strlen(path) - 1] == '/';
-    return -1;
 }
