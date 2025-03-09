@@ -3,7 +3,6 @@
 #include <string.h>
 #include <unistd.h>
 #include <arpa/inet.h>
-#include "threadpool.h"
 #include <sys/stat.h>
 #include <libgen.h>
 #include <dirent.h>
@@ -36,7 +35,6 @@ int has_execute_permissions(const char *path);
 int is_directory(const char *path);
 
 int get_file_size(char *path);
-void get_current_date(char* timebuf, size_t buff_size);
 char *get_mime_type(char *name);
 char *get_last_modified_date(const char *path);
 
@@ -48,13 +46,7 @@ int main(int argc, char* argv[]){
     }
 
     int port = atoi(argv[1]);
-    int numThreads = atoi(argv[2]);
-    int qMaxSize = atoi(argv[3]);
     int maxRequests = atoi(argv[4]);
-
-    threadpool *tp = create_threadpool(numThreads, qMaxSize);
-    if(tp == NULL)
-        exit(EXIT_FAILURE);
 
     int server_fd, client_fd;
     struct sockaddr_in address;
@@ -63,7 +55,6 @@ int main(int argc, char* argv[]){
     // Create socket
     if ((server_fd = socket(AF_INET, SOCK_STREAM, 0)) == 0) {
         perror("Socket failed");
-        destroy_threadpool(tp);
         exit(EXIT_FAILURE);
     }
 
@@ -76,7 +67,6 @@ int main(int argc, char* argv[]){
     if (bind(server_fd, (struct sockaddr *)&address, sizeof(address)) < 0) {
         perror("Bind failed");
         close(server_fd);
-        destroy_threadpool(tp);
         exit(EXIT_FAILURE);
     }
 
@@ -84,7 +74,6 @@ int main(int argc, char* argv[]){
     if (listen(server_fd, 3) < 0) {
         perror("Listen failed");
         close(server_fd);
-        destroy_threadpool(tp);
         exit(EXIT_FAILURE);
     }
 
@@ -97,7 +86,6 @@ int main(int argc, char* argv[]){
         if (client_socket == NULL) {
             perror("malloc");
             close(server_fd);
-            destroy_threadpool(tp);
             exit(EXIT_FAILURE);
         }
 
@@ -105,19 +93,18 @@ int main(int argc, char* argv[]){
         if ((client_fd = accept(server_fd, (struct sockaddr *) &address, (socklen_t *) &addrlen)) < 0) {
             perror("Accept failed");
             close(server_fd);
-            destroy_threadpool(tp);
             exit(EXIT_FAILURE);
         }
 
         *client_socket = client_fd;
-        dispatch(tp, handle_client, client_socket);
+        handle_client(client_socket);
+
         requestsCounter++;
         DEBUG_PRINT("Accepted incoming connection with client IP: %s\n", inet_ntoa(address.sin_addr));
     }
 
     DEBUG_PRINT("Starting to destroy threadpool...\n");
     // Close the connections
-    destroy_threadpool(tp);
     close(server_fd);
     return 0;
 }
@@ -197,9 +184,6 @@ char * build_http_response(int status_code, char* path, int *error) {
     char *OK_body = NULL;
     int is_file = (status_code == 200 && !is_directory(path)) ? 1 : 0;
     int is_dir = (status_code == 200 && is_directory(path)) ? 1 : 0;
-
-    // Get current date
-    get_current_date(date_header, sizeof(date_header));
 
     // Determine status text
     switch (status_code) {
@@ -438,11 +422,6 @@ int get_file_size(char *path) {
     return size;
 }
 
-void get_current_date(char *timebuf, size_t buff_size) {
-    time_t now = time(NULL);
-    strftime(timebuf, buff_size, RFC1123FMT, gmtime(&now));
-}
-
 char *get_mime_type(char *name)
 {
     char *ext = strrchr(name, '.');
@@ -508,9 +487,6 @@ int generate_directory_listing(char *dir_path, char **body) {
             continue; // Skip entries we cannot stat
         }
 
-        // Format modification time
-        strftime(time_buf, sizeof(time_buf), RFC1123FMT, gmtime(&file_stat.st_mtime));
-
         // Extract size of file
         const char *size_str = S_ISREG(file_stat.st_mode) ?
                                (sprintf(full_path, "%ld", file_stat.st_size), full_path) : "";
@@ -564,14 +540,10 @@ int generate_directory_listing(char *dir_path, char **body) {
 
 char *get_last_modified_date(const char *path) {
     static char timebuf[128];
-    struct tm tm_info;
     struct stat file_stat;
 
     if (stat(path, &file_stat) == -1)
         return NULL;
-
-    gmtime_r(&file_stat.st_mtime, &tm_info);
-    strftime(timebuf, sizeof(timebuf), RFC1123FMT, &tm_info);
 
     return timebuf;
 }
