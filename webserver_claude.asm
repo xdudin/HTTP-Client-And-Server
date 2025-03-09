@@ -1,155 +1,120 @@
-; Minimal HTTP webserver in x86_64 assembly for Linux
+; Ultra-minimal HTTP webserver in x86_64 assembly for Linux
 ; Serves index.html to any request
-; No console output
+; Fixed to prevent segmentation faults
 ; To assemble and link:
 ; nasm -f elf64 webserver.asm -o webserver.o
-; ld webserver.o -o webserver
+; ld -s webserver.o -o webserver
 
 section .data
-    ; Socket settings
-    PORT        equ 8080                ; Port to listen on
-    BACKLOG     equ 10                  ; Maximum connection backlog
-
-    ; HTTP response header template
+    ; Minimal required data
     http_header db "HTTP/1.1 200 OK", 0Dh, 0Ah
                 db "Content-Type: text/html", 0Dh, 0Ah
-                db "Connection: close", 0Dh, 0Ah
-                db 0Dh, 0Ah
+                db "Connection: close", 0Dh, 0Ah, 0Dh, 0Ah
     header_len  equ $ - http_header
 
-    ; File to serve
     filename    db "index.html", 0
 
 section .bss
-    sockfd      resq 1                  ; Socket file descriptor
-    clientfd    resq 1                  ; Client connection file descriptor
-    addr_in     resb 16                 ; sockaddr_in structure (16 bytes)
-    file_buffer resb 8192               ; Buffer for file content (8KB)
-    buffer      resb 1024               ; Buffer for HTTP request
-    file_size   resq 1                  ; Size of the file
+    buffer resb 4096                ; Buffer for file content and request
 
 section .text
     global _start
 
 _start:
     ; Create socket
-    mov rax, 41                         ; syscall: socket
-    mov rdi, 2                          ; AF_INET
-    mov rsi, 1                          ; SOCK_STREAM
-    mov rdx, 0                          ; protocol
+    mov rax, 41                     ; syscall: socket
+    mov rdi, 2                      ; AF_INET
+    mov rsi, 1                      ; SOCK_STREAM
+    xor rdx, rdx                    ; protocol = 0
     syscall
 
-    ; Check for error
-    cmp rax, 0
-    jl exit_error
+    mov r8, rax                     ; r8 = socket fd
 
-    ; Save socket descriptor
-    mov [sockfd], rax
+    ; Set up sockaddr_in on stack with proper alignment
+    sub rsp, 16                     ; Allocate 16 bytes on stack
+    mov word [rsp], 2               ; AF_INET
+    mov word [rsp+2], 0x901f        ; Port 8080 (network byte order)
+    mov dword [rsp+4], 0            ; INADDR_ANY
+    mov qword [rsp+8], 0            ; padding
 
-    ; Set up sockaddr_in structure
-    mov word [addr_in], 2               ; AF_INET
-    mov ax, PORT
-    xchg ah, al                         ; Convert to network byte order
-    mov word [addr_in + 2], ax          ; Port
-    mov dword [addr_in + 4], 0          ; INADDR_ANY (0.0.0.0)
-
-    ; Bind socket
-    mov rax, 49                         ; syscall: bind
-    mov rdi, [sockfd]
-    mov rsi, addr_in
-    mov rdx, 16                         ; sizeof(sockaddr_in)
+    ; Bind
+    mov rax, 49                     ; syscall: bind
+    mov rdi, r8                     ; socket fd
+    mov rsi, rsp                    ; pointer to sockaddr_in
+    mov rdx, 16                     ; sizeof(sockaddr_in)
     syscall
 
-    ; Check for error
-    cmp rax, 0
-    jl exit_error
-
-    ; Listen for connections
-    mov rax, 50                         ; syscall: listen
-    mov rdi, [sockfd]
-    mov rsi, BACKLOG
+    ; Listen
+    mov rax, 50                     ; syscall: listen
+    mov rdi, r8                     ; socket fd
+    mov rsi, 5                      ; backlog
     syscall
-
-    ; Check for error
-    cmp rax, 0
-    jl exit_error
 
 accept_loop:
-    ; Accept connection
-    mov rax, 43                         ; syscall: accept
-    mov rdi, [sockfd]
-    mov rsi, 0                          ; NULL addr
-    mov rdx, 0                          ; NULL addrlen
+    ; Accept
+    mov rax, 43                     ; syscall: accept
+    mov rdi, r8                     ; socket fd
+    xor rsi, rsi                    ; NULL addr
+    xor rdx, rdx                    ; NULL addrlen
     syscall
 
-    ; Check for error
-    cmp rax, 0
-    jl accept_loop                      ; Just try again on error
+    test rax, rax                   ; Check for error
+    jl accept_loop                  ; Try again if error
 
-    ; Save client descriptor
-    mov [clientfd], rax
+    mov r9, rax                     ; r9 = client fd
 
-    ; Read HTTP request (we don't actually need to process it)
-    mov rax, 0                          ; syscall: read
-    mov rdi, [clientfd]
-    mov rsi, buffer
-    mov rdx, 1024
+    ; Read request (don't need content)
+    xor rax, rax                    ; syscall: read
+    mov rdi, r9                     ; client fd
+    mov rsi, buffer                 ; buffer address
+    mov rdx, 1024                   ; buffer size (reuse part of buffer)
     syscall
 
-    ; Open index.html
-    mov rax, 2                          ; syscall: open
-    mov rdi, filename
-    mov rsi, 0                          ; O_RDONLY
-    mov rdx, 0
+    ; Open file
+    mov rax, 2                      ; syscall: open
+    mov rdi, filename               ; filename
+    xor rsi, rsi                    ; O_RDONLY
+    xor rdx, rdx                    ; mode (not used)
     syscall
 
-    ; Check for error
-    cmp rax, 0
-    jl close_client                     ; Skip to closing client if file error
+    test rax, rax                   ; Check for error
+    jl close_client                 ; Skip if file error
 
-    ; Save file descriptor
-    mov r8, rax                         ; Use r8 for file descriptor
-
-    ; Read file content
-    mov rax, 0                          ; syscall: read
-    mov rdi, r8
-    mov rsi, file_buffer
-    mov rdx, 8192
-    syscall
-
-    ; Save file size
-    mov [file_size], rax
-
-    ; Close file
-    mov rax, 3                          ; syscall: close
-    mov rdi, r8
-    syscall
+    mov r10, rax                    ; r10 = file fd
 
     ; Send HTTP header
-    mov rax, 1                          ; syscall: write
-    mov rdi, [clientfd]
-    mov rsi, http_header
-    mov rdx, header_len
+    mov rax, 1                      ; syscall: write
+    mov rdi, r9                     ; client fd
+    mov rsi, http_header            ; header text
+    mov rdx, header_len             ; header length
     syscall
 
-    ; Send file content
-    mov rax, 1                          ; syscall: write
-    mov rdi, [clientfd]
-    mov rsi, file_buffer
-    mov rdx, [file_size]
+    ; Read file content
+    xor rax, rax                    ; syscall: read
+    mov rdi, r10                    ; file fd
+    mov rsi, buffer                 ; buffer
+    mov rdx, 4096                   ; buffer size
+    syscall
+
+    test rax, rax                   ; Check for error/EOF
+    jle close_file                  ; Skip if error or empty file
+
+    mov rdx, rax                    ; bytes read
+    mov rax, 1                      ; syscall: write
+    mov rdi, r9                     ; client fd
+    mov rsi, buffer                 ; buffer with file content
+    syscall
+
+close_file:
+    ; Close file
+    mov rax, 3                      ; syscall: close
+    mov rdi, r10                    ; file fd
     syscall
 
 close_client:
-    ; Close client connection
-    mov rax, 3                          ; syscall: close
-    mov rdi, [clientfd]
+    ; Close connection
+    mov rax, 3                      ; syscall: close
+    mov rdi, r9                     ; client fd
     syscall
 
-    ; Loop back to accept more connections
-    jmp accept_loop
-
-exit_error:
-    ; Exit with error code
-    mov rax, 60                         ; syscall: exit
-    mov rdi, 1                          ; error code 1
-    syscall
+    jmp accept_loop                 ; Loop back for next connection
