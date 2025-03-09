@@ -18,7 +18,6 @@ char *build_http_response(int status_code, char *path);
 void write_to_client(int client_fd, char *buffer);
 
 int read_and_write(int client_fd, char *path);
-int find_index_html(const char *dir_path);
 
 // Main function
 int main(){
@@ -134,6 +133,10 @@ char * build_http_response(const int status_code, char* path) {
     // Add Connection header
     written += snprintf(response + written, response_size - written, "Connection: close\r\n\r\n");
 
+    // Add the body to the response
+    char *src = OK_body;
+    snprintf(response + written, response_size - written, "%s", src);
+
     if (strlen(OK_body) > 0)
         free(OK_body);
 
@@ -148,7 +151,6 @@ void write_to_client(int client_fd, char *buffer){
     while (total_sent < buffer_len) {
         ssize_t bytes_sent = write(client_fd, buffer + total_sent, buffer_len - total_sent);
         if (bytes_sent < 0) {
-            int error = 1;
             char *response = build_http_response(500, nullptr);
             write_to_client(client_fd, response);
             free(response);
@@ -156,16 +158,6 @@ void write_to_client(int client_fd, char *buffer){
         }
         total_sent += bytes_sent;
     }
-}
-
-int find_index_html(const char* dir_path){
-    char full_path[FIRST_LINE_SIZE];
-    struct stat file_Stat;
-
-    snprintf(full_path, sizeof(full_path), "%sindex.html", dir_path);
-    if (stat(full_path, &file_Stat) == 0)
-        return 1;
-    return 0;
 }
 
 int read_and_write(int client_fd, char *path){
