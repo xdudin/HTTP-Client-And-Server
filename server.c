@@ -10,6 +10,8 @@
 
 #define INITIAL_BUFFER_SIZE 8192
 #define FIRST_LINE_SIZE 4000
+#define PORT 8080
+#define MAX_REQUESTS 15
 
 // Function prototypes
 int handle_client(void *arg);
@@ -28,59 +30,42 @@ char *get_mime_type(char *name);
 char *get_last_modified_date(const char *path);
 
 // Main function
-int main(int argc, char* argv[]){
-    if(argc != 5){
-        printf("Usage: server <port> <pool-size> <max-queue-size> <max-number-of-request>\n");
-        exit(EXIT_FAILURE);
-    }
-
-    int port = atoi(argv[1]);
-    int maxRequests = atoi(argv[4]);
-
+int main(){
     int server_fd, client_fd;
     struct sockaddr_in address;
     int addrlen = sizeof(address);
 
     // Create socket
     if ((server_fd = socket(AF_INET, SOCK_STREAM, 0)) == 0) {
-        perror("Socket failed");
-        exit(EXIT_FAILURE);
+        return EXIT_FAILURE;
     }
 
     // Configure server address
     address.sin_family = AF_INET;
     address.sin_addr.s_addr = htonl(INADDR_ANY);
-    address.sin_port = htons(port);
+    address.sin_port = htons(PORT);
 
     // Bind the socket to the specified port
     if (bind(server_fd, (struct sockaddr *)&address, sizeof(address)) < 0) {
-        perror("Bind failed");
-        close(server_fd);
-        exit(EXIT_FAILURE);
+        return EXIT_FAILURE;
     }
 
     // Listen for incoming connections
     if (listen(server_fd, 3) < 0) {
-        perror("Listen failed");
-        close(server_fd);
-        exit(EXIT_FAILURE);
+        return EXIT_FAILURE;
     }
 
     int requestsCounter = 0;
-    while(requestsCounter < maxRequests) {
+    while(requestsCounter < MAX_REQUESTS) {
 
-        int* client_socket = (int*) malloc(sizeof(int));
+        int* client_socket = malloc(sizeof(int));
         if (client_socket == NULL) {
-            perror("malloc");
-            close(server_fd);
-            exit(EXIT_FAILURE);
+            return EXIT_FAILURE;
         }
 
         // Accept incoming connections
         if ((client_fd = accept(server_fd, (struct sockaddr *) &address, (socklen_t *) &addrlen)) < 0) {
-            perror("Accept failed");
-            close(server_fd);
-            exit(EXIT_FAILURE);
+            return EXIT_FAILURE;
         }
 
         *client_socket = client_fd;
@@ -96,17 +81,17 @@ int main(int argc, char* argv[]){
 
 // Client handler
 int handle_client(void *arg) {
-    int client_fd = *(int *)arg;
+    const int client_fd = *(int *)arg;
     free(arg);
     size_t total_bytes_read = 0;
-    int bytes_read;
+    ssize_t bytes_read;
     int first_line_found = 0;
     char* end_of_line;
     char first_line[FIRST_LINE_SIZE] = {0};
     char path[FIRST_LINE_SIZE] = {0};
     int status_code;
     int error = 0;
-    char *response = NULL;
+    char *response;
 
     while((bytes_read = read(client_fd, &first_line[total_bytes_read], FIRST_LINE_SIZE)) > 0){
         total_bytes_read += bytes_read;
@@ -122,7 +107,7 @@ int handle_client(void *arg) {
 
     if(bytes_read < 0){
         status_code = 500;
-        response = build_http_response(status_code, NULL, &error);
+        response = build_http_response(status_code, nullptr, &error);
         goto write;
     }
     else if(first_line_found){
@@ -138,7 +123,7 @@ int handle_client(void *arg) {
     // Write the response to client
     write_to_client(client_fd, response);
 
-    int is_file = (!error && status_code == 200 && !is_directory(path)) ? 1 : 0;
+    const int is_file = (!error && status_code == 200 && !is_directory(path)) ? 1 : 0;
 
     if (is_file)
         read_and_write(client_fd, path);
@@ -157,12 +142,12 @@ char * build_http_response(int status_code, char* path, int *error) {
             "<HTML><HEAD><TITLE>%d %s</TITLE></HEAD>\r\n"
             "<BODY><H4>%d %s</H4>\r\n%s\r\n</BODY></HTML>";
     char error_body[256] = {0};
-    const char* mime_type = NULL;
-    const char* last_modified = NULL;
+    const char* mime_type = nullptr;
+    const char* last_modified = nullptr;
     char date_header[128];
-    char *OK_body = NULL;
-    int is_file = (status_code == 200 && !is_directory(path)) ? 1 : 0;
-    int is_dir = (status_code == 200 && is_directory(path)) ? 1 : 0;
+    char *OK_body = nullptr;
+    const int is_file = (status_code == 200 && !is_directory(path)) ? 1 : 0;
+    const int is_dir = (status_code == 200 && is_directory(path)) ? 1 : 0;
 
     // Determine status text
     switch (status_code) {
@@ -192,19 +177,19 @@ char * build_http_response(int status_code, char* path, int *error) {
     else if (is_dir) {
         if (generate_directory_listing(path, &OK_body) < 0) {
             *error = 1;
-            return build_http_response(500, NULL, error);
+            return build_http_response(500, nullptr, error);
         }
     }
 
     // Calculate the response size
-    size_t body_length = (status_code == 200 ? strlen(OK_body) : strlen(error_body));
-    int response_size = 256 + body_length; // Headers + body
+    const size_t body_length = (status_code == 200 ? strlen(OK_body) : strlen(error_body));
+    const int response_size = 256 + body_length; // Headers + body
 
     // Allocate memory for the response
     char *response = (char*) malloc(response_size);
     if (!response) {
         *error = 1;
-        return build_http_response(500, NULL, error);
+        return build_http_response(500, nullptr, error);
     }
 
     int written = 0;
@@ -228,25 +213,22 @@ char * build_http_response(int status_code, char* path, int *error) {
     }
 
     // Add Content-Length header
-    size_t cont_length = is_file ? get_file_size(path) : body_length;
+    const size_t cont_length = is_file ? get_file_size(path) : body_length;
     written += snprintf(response + written, response_size - written,
              "Content-Length: %lu\r\n",
              cont_length);
 
     // Add Last-Modified header for 200 responses
     if (status_code == 200 && last_modified) {
-        written += snprintf(response + written, response_size - written,
-                 "Last-Modified: %s\r\n", last_modified);
+        written += snprintf(response + written, response_size - written, "Last-Modified: %s\r\n", last_modified);
     }
 
     // Add Connection header
-    written += snprintf(response + written, response_size - written,
-             "Connection: close\r\n\r\n");
+    written += snprintf(response + written, response_size - written, "Connection: close\r\n\r\n");
 
     // Add the body to the response
     char *src = (status_code == 200) ? OK_body : error_body;
-    written += snprintf(response + written, response_size - written,
-                        "%s", src);
+    written += snprintf(response + written, response_size - written, "%s", src);
 
     if (OK_body && strlen(OK_body) > 0)
         free(OK_body);
@@ -262,7 +244,7 @@ void write_to_client(int client_fd, char *buffer){
         ssize_t bytes_sent = write(client_fd, buffer + total_sent, buffer_len - total_sent);
         if (bytes_sent < 0) {
             int error = 1;
-            char *response = build_http_response(500, NULL, &error);
+            char *response = build_http_response(500, nullptr, &error);
             write_to_client(client_fd, response);
             free(response);
             return;
@@ -472,7 +454,7 @@ int generate_directory_listing(char *dir_path, char **body) {
             strcat(entry->d_name, "/");
 
         // Estimate required size for the new row
-        size_t row_size = snprintf(NULL, 0,
+        size_t row_size = snprintf(nullptr, 0,
                                    "<tr>\r\n<td><A HREF=\"%s\">%s</A></td><td>%s</td>\r\n<td>%s</td>\r\n</tr>\r\n\r\n",
                                    entry->d_name, entry->d_name, time_buf, size_str);
 
@@ -519,7 +501,7 @@ char *get_last_modified_date(const char *path) {
     struct stat file_stat;
 
     if (stat(path, &file_stat) == -1)
-        return NULL;
+        return nullptr;
 
     return timebuf;
 }
