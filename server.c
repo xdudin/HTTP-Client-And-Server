@@ -14,7 +14,7 @@
 
 // Function prototypes
 int handle_client(void *arg);
-char *build_http_response(int status_code, char *path);
+char *build_http_response(int status_code);
 void write_to_client(int client_fd, const char *buffer);
 
 int read_and_write(int client_fd, const char *path);
@@ -84,7 +84,7 @@ int handle_client(void *arg) {
     constexpr int status_code = 200;
 
     // Construct response
-    char *response = build_http_response(status_code, path);
+    char *response = build_http_response(status_code);
 
     write:
     // Write the response to client
@@ -99,7 +99,7 @@ int handle_client(void *arg) {
 }
 
 // Build HTTP response
-char * build_http_response(const int status_code, char* path) {
+char * build_http_response(const int status_code) {
     char date_header[128];
 
     // Determine status text
