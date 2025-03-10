@@ -1,14 +1,11 @@
-; optimized_webserver.asm – Optimized minimal x86_64 assembly web server
-; Compile: nasm -felf64 optimized_webserver.asm -o optimized_webserver.o
-; Link: ld optimized_webserver.o -o optimized_webserver
-; Run as root: sudo ./optimized_webserver
-
 section .data
     hdr    db "HTTP/1.0 200 OK",13,10,13,10
     hdrlen equ $-hdr
     file   db "index.html",0
-    ; Predefined sockaddr_in structure for AF_INET, port 80 (0x5000 in little-endian), INADDR_ANY:
-    addr   dw 2,0x5000     ; sin_family, sin_port
+    ; Predefined sockaddr_in structure:
+    ; sin_family = AF_INET (2)
+    ; sin_port = htons(8080) = 0x901F in little-endian
+    addr   dw 2,0x901F     ; sin_family, sin_port for port 8080
            dd 0          ; sin_addr (0 for INADDR_ANY)
            dq 0          ; padding
 
