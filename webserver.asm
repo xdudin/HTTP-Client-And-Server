@@ -8,9 +8,7 @@ section .data
     addr   dw 2,0x901F     ; sin_family, sin_port
            dd 0          ; sin_addr (0 for INADDR_ANY)
            dq 0          ; padding
-
-section .bss
-    buf    resb 4096
+    buf    times 27 db 0   ; allocate 27 bytes for the file content
 
 section .text
     global _start
@@ -60,11 +58,11 @@ _start:
     mov   rcx, rax     ; file descriptor for index.html
 
 .read_loop:
-    ; Read file: read(file, buf, 4096)
+    ; Read file: read(file, buf, 27)
     mov   rax, 0       ; sys_read
     mov   rdi, rcx
     mov   rsi, buf
-    mov   rdx, 4096
+    mov   rdx, 27
     syscall
     test  rax, rax
     jle   .shutdown_client
@@ -77,11 +75,6 @@ _start:
     jmp   .read_loop
 
 .shutdown_client:
-    ; Gracefully shutdown writing side: shutdown(client, SHUT_WR)
-    mov   rax, 48      ; sys_shutdown
-    mov   rdi, rbx     ; client socket
-    mov   rsi, 1       ; SHUT_WR
-    syscall
     ; Close the client socket
     mov   rax, 3       ; sys_close
     mov   rdi, rbx
