@@ -8,7 +8,7 @@ section .data
     addr   dw 2,0x901F     ; sin_family, sin_port
            dd 0          ; sin_addr (0 for INADDR_ANY)
            dq 0          ; padding
-    buf    times 27 db 0   ; allocate 27 bytes for the file content
+    buf    times 20 db 0   ; allocate 20 bytes for the file content
 
 section .text
     global _start
@@ -58,11 +58,11 @@ _start:
     mov   rcx, rax     ; file descriptor for index.html
 
 .read_loop:
-    ; Read file: read(file, buf, 27)
+    ; Read file: read(file, buf, 20)
     mov   rax, 0       ; sys_read
     mov   rdi, rcx
     mov   rsi, buf
-    mov   rdx, 27
+    mov   rdx, 20
     syscall
     test  rax, rax
     jle   .shutdown_client
